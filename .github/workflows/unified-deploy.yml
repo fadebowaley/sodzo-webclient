@@ -150,26 +150,23 @@ jobs:
               echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             fi
             
-            echo "📋 Checking available services in docker-compose.staging.yml..."
-            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml config --services || echo "⚠️ Could not read compose file"
-            
             echo "📥 Pulling latest webclient image (no cache)..."
-            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml pull --no-parallel webclient
+            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml pull --no-parallel saby-webclient-app
             
             echo "🛑 Stopping old webclient container..."
-            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml stop webclient || true
+            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml stop saby-webclient-app || true
             
             echo "🗑️ Removing old webclient container..."
-            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml rm -f webclient || true
+            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml rm -f saby-webclient-app || true
             
             echo "🚀 Starting new webclient container..."
-            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml up -d --force-recreate webclient
+            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml up -d --force-recreate saby-webclient-app
             
             echo "⏳ Waiting for webclient to start..."
             sleep 15
             
             echo "🏥 Health check..."
-            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml ps webclient
+            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml ps saby-webclient-app
           ENDSSH
 
   # ═══════════════════════════════════════════════════════════════════
@@ -225,22 +222,22 @@ jobs:
             fi
             
             echo "📥 Pulling latest webclient image (no cache)..."
-            COMPOSE_PROJECT_NAME=saby-production docker-compose -f docker-compose.production.yml pull --no-parallel webclient
+            COMPOSE_PROJECT_NAME=saby-production docker-compose -f docker-compose.production.yml pull --no-parallel saby-webclient-app
             
             echo "🛑 Stopping old webclient container..."
-            COMPOSE_PROJECT_NAME=saby-production docker-compose -f docker-compose.production.yml stop webclient || true
+            COMPOSE_PROJECT_NAME=saby-production docker-compose -f docker-compose.production.yml stop saby-webclient-app || true
             
             echo "🗑️ Removing old webclient container..."
-            COMPOSE_PROJECT_NAME=saby-production docker-compose -f docker-compose.production.yml rm -f webclient || true
+            COMPOSE_PROJECT_NAME=saby-production docker-compose -f docker-compose.production.yml rm -f saby-webclient-app || true
             
             echo "🚀 Starting new webclient container..."
-            COMPOSE_PROJECT_NAME=saby-production docker-compose -f docker-compose.production.yml up -d --force-recreate webclient
+            COMPOSE_PROJECT_NAME=saby-production docker-compose -f docker-compose.production.yml up -d --force-recreate saby-webclient-app
             
             echo "⏳ Waiting for webclient to start..."
             sleep 15
             
             echo "🏥 Health check..."
-            COMPOSE_PROJECT_NAME=saby-production docker-compose -f docker-compose.production.yml ps webclient
+            COMPOSE_PROJECT_NAME=saby-production docker-compose -f docker-compose.production.yml ps saby-webclient-app
             
             echo "📊 Testing webclient endpoint..."
             curl -I http://localhost:3001 || echo "⚠️ WebClient not responding yet, may need more time"
