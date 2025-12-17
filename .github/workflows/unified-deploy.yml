@@ -53,7 +53,7 @@ jobs:
             echo "IMAGE_TAG=production" >> $GITHUB_OUTPUT
           else
             echo "ENVIRONMENT=staging" >> $GITHUB_OUTPUT
-            echo "VITE_API_BASE=https://api-dev.saby.ai/v1" >> $GITHUB_OUTPUT
+            echo "VITE_API_BASE=https://api.stg.saby.ai/v1" >> $GITHUB_OUTPUT
             echo "IMAGE_TAG=staging" >> $GITHUB_OUTPUT
           fi
 
