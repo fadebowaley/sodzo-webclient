@@ -150,6 +150,9 @@ jobs:
               echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             fi
             
+            echo "📋 Checking available services in docker-compose.staging.yml..."
+            COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml config --services || echo "⚠️ Could not read compose file"
+            
             echo "📥 Pulling latest webclient image (no cache)..."
             COMPOSE_PROJECT_NAME=saby-staging docker-compose -f docker-compose.staging.yml pull --no-parallel webclient
             
