@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   User as UserIcon,
   Globe,
@@ -17,9 +18,8 @@ import {
   X,
   Pencil,
 } from "lucide-react";
-import { useUser } from "../contexts/UserContext";
-import type { User as UserModel } from "../contexts/UserContext";
 import { useAuth } from "../contexts/AuthContext";
+import type { User } from "../contexts/AuthContext";
 import { mockUser } from "../data/mockData";
 import toast from "react-hot-toast";
 import NodeProfileClean from "./NodeProfileClean";
@@ -34,14 +34,7 @@ import DynamicFormRenderer from "../components/Forms/DynamicFormRenderer";
 import EmailPhoneChangeModal from "../components/Modals/EmailPhoneChangeModal";
 
 export default function Settings() {
-  const { user: userContextUser, setUser: setUserContext } = useUser();
-  const {
-    api,
-    logout,
-    user: authUser,
-    setUser: setAuthUser,
-    token: accessToken,
-  } = useAuth();
+  const { api, logout, user, setUser, token: accessToken } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Get initial tab from URL parameter
@@ -59,10 +52,6 @@ export default function Settings() {
     setActiveTab(tabId);
     setSearchParams({ tab: tabId });
   };
-
-  // prefer the authenticated user when available
-  const user: Partial<UserModel> | null =
-    (authUser as unknown as Partial<UserModel>) ?? userContextUser ?? null;
 
   type NotificationKey = "email" | "push" | "sms" | "marketing";
   const [notifications, setNotifications] = useState<
@@ -87,78 +76,179 @@ export default function Settings() {
   );
 
   function EditableProfileForm() {
-    const [userData, setUserData] = useState<any>(null);
-    const [formFields, setFormFields] = useState<FormField[]>([]);
+    const queryClient = useQueryClient();
     const [formValues, setFormValues] = useState<Record<string, any>>({});
-    const [loading, setLoading] = useState(true);
     const [isEditing, setIsEditing] = useState(false);
     const [saving, setSaving] = useState(false);
     const [emailModalOpen, setEmailModalOpen] = useState(false);
     const [phoneModalOpen, setPhoneModalOpen] = useState(false);
 
-    // Fetch user profile and schema on mount
-    useEffect(() => {
-      const fetchUserProfile = async () => {
+    // Fetch user profile and schema using React Query
+    const {
+      data: userProfileData,
+      isLoading: loading,
+      error: profileError,
+    } = useQuery({
+      queryKey: ["userProfile", user?.id],
+      queryFn: async () => {
         if (!user?.id) {
-          setLoading(false);
+          // Return null if user.id is missing - this is expected during initial load
+          return null;
+        }
+
+        // Fetch both schema and actual user data in parallel
+        const [schemaResponse, dataResponse] = await Promise.all([
+          api.get(`/schema/user`).catch((err) => {
+            // Log but don't fail on schema errors (it's optional)
+            if (err.response?.status !== 401) {
+              console.warn("[Settings] Schema fetch failed:", err);
+            }
+            return null;
+          }),
+          api.get(`/users/${user.id}`).catch((err) => {
+            // Handle 401 by triggering logout
+            if (err.response?.status === 401) {
+              logout();
+              toast.error("Session expired — please sign in again");
+              return null;
+            }
+            throw err;
+          }),
+        ]);
+
+        // If dataResponse failed, return null
+        if (!dataResponse) {
+          return null;
+        }
+
+        const fullUserData = dataResponse.data;
+        const schemaData = schemaResponse?.data?.data || null;
+
+        // Use schema if available, otherwise fallback to data-driven mapping
+        let fields: FormField[] = [];
+        if (schemaData) {
+          // Use schema-based mapping for accurate field definitions
+          fields = mapUserSchemaToFields(schemaData, fullUserData);
+        } else {
+          // Fallback to data-driven mapping
+          fields = mapUserProfileToFields(fullUserData);
+        }
+
+        return {
+          userData: fullUserData,
+          formFields: fields,
+          schemaData,
+        };
+      },
+      enabled: !!user?.id,
+      retry: (failureCount, error: any) => {
+        // Don't retry on 401 errors
+        if (error?.response?.status === 401) {
+          logout();
+          toast.error("Session expired — please sign in again");
+          return false;
+        }
+        return failureCount < 2; // Retry up to 2 times
+      },
+    });
+
+    // Extract data from query result
+    const userData = userProfileData?.userData || null;
+    const formFields = userProfileData?.formFields || [];
+
+    // Handle errors
+    useEffect(() => {
+      if (profileError) {
+        const axiosError = profileError as any;
+
+        // Don't show error for 401 - logout handles it
+        if (axiosError.response?.status === 401) {
           return;
         }
 
-        try {
-          setLoading(true);
-
-          // Fetch both schema and actual user data in parallel
-          const [schemaResponse, dataResponse] = await Promise.all([
-            api.get(`/schema/user`).catch(() => null), // Schema is optional
-            api.get(`/users/${user.id}`),
-          ]);
-
-          const fullUserData = dataResponse.data;
-          setUserData(fullUserData);
-
-          // Use schema if available, otherwise fallback to data-driven mapping
-          let fields: FormField[] = [];
-          if (schemaResponse?.data?.data) {
-            // Use schema-based mapping for accurate field definitions
-            fields = mapUserSchemaToFields(
-              schemaResponse.data.data,
-              fullUserData
+        // Don't show error if user.id is missing (query shouldn't run)
+        if (!user?.id) {
+          if (import.meta.env.DEV) {
+            console.warn(
+              "[Settings] Profile fetch error but user.id is missing - query should not have run"
             );
-          } else {
-            // Fallback to data-driven mapping
-            fields = mapUserProfileToFields(fullUserData);
           }
-
-          setFormFields(fields);
-
-          // Initialize form values from user data
-          const initialValues: Record<string, any> = {};
-          fields.forEach((field) => {
-            // Get nested value from userData (e.g., "customFields.title" -> userData.customFields.title)
-            const value = getNestedValue(fullUserData, field.name);
-            // Store as flat key for formValues (e.g., "customFields.title" as key)
-            initialValues[field.name] =
-              value !== undefined && value !== null
-                ? value
-                : field.value !== undefined && field.value !== null
-                ? field.value
-                : "";
-          });
-          setFormValues(initialValues);
-        } catch (err: any) {
-          if (err.response?.status === 401) {
-            logout();
-            toast.error("Session expired — please sign in again");
-          } else {
-            toast.error("Failed to load profile");
-          }
-        } finally {
-          setLoading(false);
+          return;
         }
-      };
 
-      fetchUserProfile();
-    }, [user?.id, api, logout]);
+        // Log error details for debugging
+        if (import.meta.env.DEV) {
+          console.error("Profile fetch error:", {
+            error: profileError,
+            message: axiosError.message,
+            status: axiosError.response?.status,
+            userId: user?.id,
+          });
+        }
+
+        // Show user-friendly error
+        const errorMessage =
+          axiosError.response?.data?.message ||
+          axiosError.message ||
+          "Failed to load user profile";
+        toast.error(errorMessage);
+      }
+    }, [profileError, user?.id]);
+
+    // Initialize form values when data is loaded
+    useEffect(() => {
+      if (!userData || formFields.length === 0) return;
+
+      // Restore from localStorage draft if available
+      let savedDraft: Record<string, any> | null = null;
+      if (user?.id) {
+        try {
+          const storageKey = `user_profile_draft_${user.id}`;
+          const draftData = localStorage.getItem(storageKey);
+          if (draftData) {
+            savedDraft = JSON.parse(draftData);
+          }
+        } catch (e) {
+          // localStorage may be unavailable or corrupted, ignore
+          if (import.meta.env.DEV) {
+            console.warn(
+              "[Settings] Failed to load draft from localStorage:",
+              e
+            );
+          }
+        }
+      }
+
+      // Initialize form values - merge existing values (if editing) with saved draft and new fields
+      setFormValues((prevValues) => {
+        // If we're editing, preserve existing values; otherwise start fresh
+        const baseValues = isEditing ? prevValues : {};
+        const initialValues: Record<string, any> = { ...baseValues };
+
+        formFields.forEach((field) => {
+          // Only set value if it doesn't already exist (preserves user input when editing)
+          if (initialValues[field.name] === undefined) {
+            // First check if we have a saved draft value for this field
+            if (savedDraft && savedDraft[field.name] !== undefined) {
+              initialValues[field.name] = savedDraft[field.name];
+            } else {
+              // Otherwise, get nested value from userData
+              const value = getNestedValue(userData, field.name);
+              initialValues[field.name] =
+                value !== undefined && value !== null
+                  ? value
+                  : field.value !== undefined && field.value !== null
+                  ? field.value
+                  : "";
+            }
+          }
+        });
+
+        return initialValues;
+      });
+      // Note: isEditing is intentionally NOT in dependencies to prevent resetting values during editing
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [userData, formFields, user?.id]);
 
     const getNestedValue = (obj: any, path: string): any => {
       return path.split(".").reduce((current, key) => {
@@ -169,10 +259,30 @@ export default function Settings() {
     };
 
     const handleFieldChange = (fieldPath: string, value: any) => {
-      setFormValues((prev) => ({
-        ...prev,
-        [fieldPath]: value,
-      }));
+      setFormValues((prev) => {
+        const updated = {
+          ...prev,
+          [fieldPath]: value,
+        };
+
+        // Persist form values to localStorage as user types
+        if (user?.id) {
+          try {
+            const storageKey = `user_profile_draft_${user.id}`;
+            localStorage.setItem(storageKey, JSON.stringify(updated));
+          } catch (e) {
+            // localStorage may be unavailable, ignore
+            if (import.meta.env.DEV) {
+              console.warn(
+                "[Settings] Failed to save draft to localStorage:",
+                e
+              );
+            }
+          }
+        }
+
+        return updated;
+      });
     };
 
     const handleSave = async () => {
@@ -215,13 +325,11 @@ export default function Settings() {
           console.log("[Settings] Extracted user data:", updated);
         }
 
-        // Update user data and form fields
+        // Update user data - merge with existing data from cache
         const mergedData = { ...userData, ...updated };
-        setUserData(mergedData);
 
         // Regenerate form fields in case structure changed
         const updatedFields = mapUserProfileToFields(mergedData);
-        setFormFields(updatedFields);
 
         // Update form values with new data
         const updatedValues: Record<string, any> = {};
@@ -231,15 +339,40 @@ export default function Settings() {
         });
         setFormValues(updatedValues);
 
-        // Update contexts
-        const merged = { ...(userContextUser ?? {}), ...updated } as UserModel;
-        setUserContext(merged);
-        if (typeof setAuthUser === "function") {
-          setAuthUser(merged as unknown as UserModel);
+        // Update user context (now unified in AuthContext)
+        const merged = { ...(user ?? {}), ...updated } as User;
+        setUser(merged);
+
+        // Update React Query cache optimistically with new data
+        queryClient.setQueryData(["userProfile", user?.id], (oldData: any) => {
+          if (!oldData) return oldData;
+          return {
+            ...oldData,
+            userData: mergedData,
+            formFields: updatedFields,
+          };
+        });
+
+        // Invalidate React Query cache to ensure fresh data on next fetch
+        queryClient.invalidateQueries({ queryKey: ["userProfile", user?.id] });
+        // Also invalidate related queries that might be affected by user profile changes
+        if (user?.id) {
+          queryClient.invalidateQueries({ queryKey: ["nodes", user.id] });
+          queryClient.invalidateQueries({ queryKey: ["userNodes", user.id] });
         }
 
         toast.success("Profile updated successfully!");
         setIsEditing(false);
+
+        // Clear the draft from localStorage after successful save
+        if (user?.id) {
+          try {
+            const storageKey = `user_profile_draft_${user.id}`;
+            localStorage.removeItem(storageKey);
+          } catch (e) {
+            // ignore
+          }
+        }
       } catch (err: unknown) {
         console.error("[Settings] Save error:", err);
         let msg = "Update failed";
@@ -331,7 +464,30 @@ export default function Settings() {
 
             {/* Right: Edit Button */}
             <button
-              onClick={() => setIsEditing(!isEditing)}
+              onClick={() => {
+                if (isEditing) {
+                  // Reset form values to original user data when canceling
+                  if (userData) {
+                    const resetValues: Record<string, any> = {};
+                    formFields.forEach((field) => {
+                      const value = getNestedValue(userData, field.name);
+                      resetValues[field.name] = value ?? field.value ?? "";
+                    });
+                    setFormValues(resetValues);
+
+                    // Clear the draft from localStorage when canceling
+                    if (user?.id) {
+                      try {
+                        const storageKey = `user_profile_draft_${user.id}`;
+                        localStorage.removeItem(storageKey);
+                      } catch (e) {
+                        // ignore
+                      }
+                    }
+                  }
+                }
+                setIsEditing(!isEditing);
+              }}
               className="flex items-center px-4 py-2 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors whitespace-nowrap">
               <Edit3 className="w-4 h-4 mr-2" />
               {isEditing ? "Cancel" : "Edit Profile"}
@@ -466,52 +622,32 @@ export default function Settings() {
           type="email"
           currentValue={userData?.email || ""}
           onSuccess={async () => {
-            // Reload user data after successful change
-            if (user?.id) {
-              try {
-                const resp = await api.get(`/users/${user.id}`);
-                const updated = resp.data;
-                setUserData(updated);
-                // Update form values
-                const updatedValues: Record<string, any> = {};
-                formFields.forEach((field) => {
-                  const value = getNestedValue(updated, field.name);
-                  updatedValues[field.name] = value ?? field.value ?? "";
-                });
-                setFormValues(updatedValues);
-              } catch (err) {
-                console.error("Failed to reload user data:", err);
-              }
-            }
+            // Invalidate cache to trigger refetch - EmailPhoneChangeModal already invalidates,
+            // but we'll do it here too to ensure form values update
+            queryClient.invalidateQueries({
+              queryKey: ["userProfile", user?.id],
+            });
+            // The query will automatically refetch and update userData/formFields
           }}
-        />
+        />;
 
-        {/* Phone Change Modal */}
+        {
+          /* Phone Change Modal */
+        }
         <EmailPhoneChangeModal
           isOpen={phoneModalOpen}
           onClose={() => setPhoneModalOpen(false)}
           type="phone"
           currentValue={userData?.phoneNumber || ""}
           onSuccess={async () => {
-            // Reload user data after successful change
-            if (user?.id) {
-              try {
-                const resp = await api.get(`/users/${user.id}`);
-                const updated = resp.data;
-                setUserData(updated);
-                // Update form values
-                const updatedValues: Record<string, any> = {};
-                formFields.forEach((field) => {
-                  const value = getNestedValue(updated, field.name);
-                  updatedValues[field.name] = value ?? field.value ?? "";
-                });
-                setFormValues(updatedValues);
-              } catch (err) {
-                console.error("Failed to reload user data:", err);
-              }
-            }
+            // Invalidate cache to trigger refetch - EmailPhoneChangeModal already invalidates,
+            // but we'll do it here too to ensure form values update
+            queryClient.invalidateQueries({
+              queryKey: ["userProfile", user?.id],
+            });
+            // The query will automatically refetch and update userData/formFields
           }}
-        />
+        />;
       </div>
     );
   }

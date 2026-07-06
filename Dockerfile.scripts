@@ -1,0 +1,31 @@
+# Script-only Dockerfile for local compose builds with cross-app parity imports.
+FROM node:20-alpine AS builder
+
+WORKDIR /app/sabyWeb
+
+# Install web dependencies first for layer caching
+COPY sabyWeb/package*.json ./
+RUN npm ci
+
+# Copy web source and parity dependency sources used via Vite aliases
+COPY sabyWeb/ ./
+COPY sabyFrontend/packages/isomorphic-core /app/sabyFrontend/packages/isomorphic-core
+
+ARG VITE_API_BASE=https://api.saby.ai/v1
+ENV VITE_API_BASE=$VITE_API_BASE
+
+RUN npm run build
+
+FROM nginx:alpine
+
+COPY --from=builder /app/sabyWeb/dist /usr/share/nginx/html
+COPY sabyWeb/nginx.conf /etc/nginx/conf.d/default.conf
+RUN echo '{"status":"healthy","service":"WebClient","version":"1.0.0"}' > /usr/share/nginx/html/health.json
+
+EXPOSE 3001
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3001/health.json || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]
+

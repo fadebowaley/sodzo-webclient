@@ -1,10 +1,12 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
-import { useUser } from "../contexts/UserContext";
-import type { User as UserModel } from "../contexts/UserContext";
+import type { User } from "../contexts/AuthContext";
 import { Trophy, Shield, TrendingUp } from "lucide-react";
 import toast from "react-hot-toast";
 import { useDeviceDetection } from "../hooks/useDeviceDetection";
+import { useUserNode } from "../hooks/useUserNode";
+import { motion } from "framer-motion";
 
 interface LeaderBoardUser {
   id: string;
@@ -28,82 +30,139 @@ interface ComplianceRecord {
 }
 
 export default function Reports() {
-  const { api, logout, user: authUser } = useAuth();
-  const { user: userContextUser } = useUser();
+  const { api, logout, user } = useAuth();
   const { isMobile } = useDeviceDetection();
+  const { nodeId: userNodeId } = useUserNode();
   const [activeTab, setActiveTab] = useState<"leaderboard" | "compliance">(
     "leaderboard"
   );
-  const [leaderboard, setLeaderboard] = useState<LeaderBoardUser[]>([]);
-  const [compliance, setCompliance] = useState<ComplianceRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
 
-  const user: Partial<UserModel> | null =
-    (authUser as unknown as Partial<UserModel>) ?? userContextUser ?? null;
   const userId = user?.id;
+  const isOwner = Boolean(user?.isOwner || user?.isSuper);
 
-  // Fetch leaderboard data
-  useEffect(() => {
-    const fetchLeaderboard = async () => {
-      if (activeTab !== "leaderboard") return;
+  const { data: modules = [] } = useQuery({
+    queryKey: ["report-modules"],
+    queryFn: async () => {
+      const res = await api.get("/project-forms");
+      const results = res.data?.results || [];
+      return results.map((module: any) => ({
+        projectId: module.projectId,
+        projectName:
+          module.configuration?.projectName ||
+          module.projectName ||
+          module.projectId,
+      }));
+    },
+    enabled: activeTab === "compliance",
+  });
 
-      try {
-        setLoading(true);
-        // TODO: Replace with actual leaderboard endpoint when available
-        // For now, this is a placeholder - you'll need to create this endpoint
-        // const res = await api.get(`/reports/leaderboard`);
-        // setLeaderboard(res.data?.results || res.data || []);
-
-        // Placeholder: Fetch users as leaderboard data
-        if (userId) {
-          // Using a placeholder - replace with actual leaderboard endpoint
-          setLeaderboard([]);
-        }
-      } catch (err: any) {
-        if (err.response?.status === 401) {
-          logout();
-          toast.error("Session expired — please sign in again");
-        } else {
-          toast.error("Failed to load leaderboard");
-          console.error("Leaderboard fetch error:", err);
-        }
-      } finally {
-        setLoading(false);
+  const {
+    data: moduleTable,
+    isLoading: moduleTableLoading,
+    error: moduleTableError,
+  } = useQuery({
+    queryKey: ["module-table", selectedProjectId, userNodeId, isOwner],
+    queryFn: async () => {
+      if (!selectedProjectId) return null;
+      const params: Record<string, string> = {
+        project_id: selectedProjectId,
+      };
+      if (!isOwner && userNodeId) {
+        params.node_id = userNodeId;
       }
-    };
+      const res = await api.get("/submission-reports/module-table", { params });
+      return res.data;
+    },
+    enabled: activeTab === "compliance" && !!selectedProjectId,
+  });
 
-    fetchLeaderboard();
-  }, [activeTab, userId, api, logout]);
-
-  // Fetch compliance data
   useEffect(() => {
-    const fetchCompliance = async () => {
-      if (activeTab !== "compliance") return;
+    if (!selectedProjectId && modules.length > 0) {
+      setSelectedProjectId(modules[0].projectId);
+    }
+  }, [modules, selectedProjectId]);
 
-      try {
-        setLoading(true);
-        // TODO: Replace with actual compliance endpoint when available
-        // For now, this is a placeholder - you'll need to create this endpoint
-        // const res = await api.get(`/reports/compliance`);
-        // setCompliance(res.data?.results || res.data || []);
+  // Fetch leaderboard data using React Query
+  const {
+    data: leaderboard = [],
+    isLoading: leaderboardLoading,
+    error: leaderboardError,
+  } = useQuery({
+    queryKey: ["leaderboard", userId],
+    queryFn: async () => {
+      if (!userId) return [];
 
-        // Placeholder: empty compliance data
-        setCompliance([]);
-      } catch (err: any) {
-        if (err.response?.status === 401) {
-          logout();
-          toast.error("Session expired — please sign in again");
-        } else {
-          toast.error("Failed to load compliance data");
-          console.error("Compliance fetch error:", err);
-        }
-      } finally {
-        setLoading(false);
+      // TODO: Replace with actual leaderboard endpoint when available
+      // For now, this is a placeholder - you'll need to create this endpoint
+      // const res = await api.get(`/reports/leaderboard`);
+      // return res.data?.results || res.data || [];
+
+      // Placeholder: return empty array
+      return [];
+    },
+    enabled: activeTab === "leaderboard" && !!userId,
+    retry: (failureCount, error: any) => {
+      // Don't retry on 401 errors
+      if (error?.response?.status === 401) {
+        logout();
+        toast.error("Session expired — please sign in again");
+        return false;
       }
-    };
+      return failureCount < 2; // Retry up to 2 times
+    },
+  });
 
-    fetchCompliance();
-  }, [activeTab, api, logout]);
+  // Fetch compliance data using React Query
+  const {
+    data: compliance = [],
+    isLoading: complianceLoading,
+    error: complianceError,
+  } = useQuery({
+    queryKey: ["compliance", userId],
+    queryFn: async () => {
+      if (!userId) return [];
+
+      // TODO: Replace with actual compliance endpoint when available
+      // For now, this is a placeholder - you'll need to create this endpoint
+      // const res = await api.get(`/reports/compliance`);
+      // return res.data?.results || res.data || [];
+
+      // Placeholder: return empty array
+      return [];
+    },
+    enabled: activeTab === "compliance" && !!userId,
+    retry: (failureCount, error: any) => {
+      // Don't retry on 401 errors
+      if (error?.response?.status === 401) {
+        logout();
+        toast.error("Session expired — please sign in again");
+        return false;
+      }
+      return failureCount < 2; // Retry up to 2 times
+    },
+  });
+
+  // Determine loading state based on active tab
+  const loading =
+    activeTab === "leaderboard" ? leaderboardLoading : complianceLoading;
+
+  // Handle errors
+  if (leaderboardError && activeTab === "leaderboard") {
+    const axiosError = leaderboardError as any;
+    if (axiosError.response?.status !== 401) {
+      toast.error("Failed to load leaderboard");
+      console.error("Leaderboard fetch error:", leaderboardError);
+    }
+  }
+
+  if (complianceError && activeTab === "compliance") {
+    const axiosError = complianceError as any;
+    if (axiosError.response?.status !== 401) {
+      toast.error("Failed to load compliance data");
+      console.error("Compliance fetch error:", complianceError);
+    }
+  }
 
   const tabs = [
     {
@@ -363,20 +422,83 @@ export default function Reports() {
                   </div>
                 )}
 
-                {compliance.length === 0 ? (
+                <div className="mb-4 space-y-3">
+                  <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">
+                    Select Module
+                  </label>
+                  <select
+                    value={selectedProjectId}
+                    onChange={(e) => setSelectedProjectId(e.target.value)}
+                    className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800"
+                  >
+                    <option value="">Select module</option>
+                    {modules.map((module: any) => (
+                      <option key={module.projectId} value={module.projectId}>
+                        {module.projectName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {moduleTableError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                    {(moduleTableError as any)?.response?.data?.message ||
+                      "Failed to load module report table"}
+                  </div>
+                ) : moduleTableLoading ? (
+                  <div className="text-center py-8 text-sm text-gray-500">
+                    Loading module report table...
+                  </div>
+                ) : moduleTable?.rows?.length ? (
+                  <div className="overflow-x-auto rounded-lg border border-gray-200">
+                    <table className="min-w-full text-xs">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          {(moduleTable.columns || []).map((column: any) => (
+                            <th
+                              key={column.key}
+                              className="whitespace-nowrap border-b px-3 py-2 text-left font-semibold text-gray-700"
+                            >
+                              {column.label}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {moduleTable.rows.map((row: any, idx: number) => (
+                          <tr key={`${row.submission_id || idx}`} className="border-b">
+                            {(moduleTable.columns || []).map((column: any) => (
+                              <td
+                                key={`${row.submission_id || idx}-${column.key}`}
+                                className="whitespace-nowrap px-3 py-2 text-gray-700"
+                              >
+                                {row[column.key] === null || row[column.key] === undefined
+                                  ? "—"
+                                  : String(row[column.key])}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
                   <div className="text-center py-8 mobile:py-8 md:py-12">
                     <Shield className="w-12 h-12 mobile:w-12 mobile:h-12 md:w-16 md:h-16 mx-auto text-gray-300 dark:text-gray-600 mb-4" />
                     <p className="text-sm mobile:text-sm md:text-base text-gray-500 dark:text-gray-400">
-                      No compliance data available
+                      No module report data available
                     </p>
                     <p className="text-xs mobile:text-xs md:text-sm text-gray-400 dark:text-gray-500 mt-2">
-                      Compliance records will appear here when data is available
+                      Submit module data to populate report rows
                     </p>
                   </div>
-                ) : isMobile ? (
+                )}
+
+                {/* legacy compliance cards/table retained below */}
+                {compliance.length > 0 && isMobile ? (
                   /* Mobile Card View */
                   <div className="space-y-3">
-                    {compliance.map((record) => (
+                    {compliance.map((record, index) => (
                       <motion.div
                         key={record.id}
                         className="mobile-card rounded-xl p-4 border border-gray-200/50 dark:border-gray-600/50 floating-animation"

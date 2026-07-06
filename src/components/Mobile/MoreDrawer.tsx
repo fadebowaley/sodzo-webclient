@@ -5,10 +5,10 @@ import {
   Mail,
   Cloud,
   ShieldCheck,
+  ShoppingBag,
   X,
   ChevronRight,
 } from "lucide-react";
-import { useUser } from "../../contexts/UserContext";
 import { useAuth } from "../../contexts/AuthContext";
 
 interface MoreDrawerProps {
@@ -25,11 +25,10 @@ interface MoreMenuItem {
 
 export default function MoreDrawer({ isOpen, onClose }: MoreDrawerProps) {
   const location = useLocation();
-  const { user } = useUser();
-  const { user: authUser } = useAuth();
+  const { user } = useAuth();
 
   // Check if user has admin privileges
-  const currentUser = user || (authUser as any);
+  const currentUser = user;
   const hasAdminAccess =
     currentUser?.isSaby === true ||
     currentUser?.isOwner === true ||
@@ -39,6 +38,7 @@ export default function MoreDrawer({ isOpen, onClose }: MoreDrawerProps) {
     { name: "Network", href: "/network", icon: Network },
     { name: "Email Center", href: "/emails", icon: Mail },
     { name: "Cloud Storage", href: "/storage", icon: Cloud },
+    { name: "Store", href: "/store", icon: ShoppingBag },
     { name: "Admin", href: "/admin", icon: ShieldCheck, ownerOnly: true },
   ];
 

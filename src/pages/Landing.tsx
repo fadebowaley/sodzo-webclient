@@ -147,12 +147,12 @@ export default function Landing() {
               transition={{ type: "spring", stiffness: 400 }}>
               <img
                 src="/logo.png"
-                alt="Sword of the Spirit Ministries Logo"
+                alt="The Sword of the Spirit Ministries Logo"
                 className="h-12 w-auto drop-shadow-lg"
               />
               <div className="hidden sm:block">
                 <p className="text-sm font-bold gradient-text">
-                  Sword of the Spirit Ministries
+                  The Sword of the Spirit Ministries
                 </p>
               </div>
             </motion.div>
@@ -262,7 +262,7 @@ export default function Landing() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.8, duration: 0.8 }}>
-            Welcome to Sword of the Spirit Ministries' submission portal —
+            Welcome to The Sword of the Spirit Ministries' submission portal —
             securely submit your data, stay organized, and support the work of
             the ministry.
           </motion.p>
@@ -454,7 +454,7 @@ export default function Landing() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center">
             <p className="text-gray-400">
-              © 2024 Sword of the Spirit Ministries. All rights reserved.
+              © 2024 The Sword of the Spirit Ministries. All rights reserved.
             </p>
           </div>
         </div>

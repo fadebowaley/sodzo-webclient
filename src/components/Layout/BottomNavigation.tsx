@@ -26,7 +26,7 @@ export default function BottomNavigation({
 
   const primaryNavItems: NavItem[] = [
     { path: "/dashboard", icon: Home, label: "Dashboard" },
-    { path: "/projects", icon: FolderOpen, label: "Projects" },
+    { path: "/projects", icon: FolderOpen, label: "Modules" },
     { path: "/calendar", icon: Calendar, label: "Calendar" },
     { path: "/reports", icon: BarChart3, label: "Reports" },
   ];
@@ -105,6 +105,7 @@ export default function BottomNavigation({
             location.pathname === "/network" ||
             location.pathname === "/emails" ||
             location.pathname === "/storage" ||
+            location.pathname === "/store" ||
             location.pathname === "/admin"
               ? "text-blue-600 dark:text-blue-400"
               : "text-gray-500 dark:text-gray-400"

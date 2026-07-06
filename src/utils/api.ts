@@ -5,15 +5,13 @@ import axios, {
 } from "axios";
 import { getApiKeySync } from "./apiKeyStorage";
 import { db } from "./dbService";
-import { getLoginModeSync, shouldAddApiKeyToLogin } from "./loginMode";
+import { ENV_CONFIG } from "./env";
+import { extractRateLimitInfo, getSecondsUntilReset } from "./rateLimit";
 
 // Vite env: use VITE_API_BASE for flexible dev/prod bases.
-// For local development we recommend setting VITE_API_BASE=/v1 and using the Vite proxy (see vite.config.ts).
-// Prefer explicit VITE_API_BASE, otherwise use a dev-relative path when in development
-// so the Vite proxy forwards requests to the staging API and avoids CORS.
+// Default to production API to avoid accidental staging calls in production builds.
 export const API_BASE =
-  (import.meta.env.VITE_API_BASE as string) ??
-  (import.meta.env.DEV ? "/v1" : "https://api-dev.saby.ai/v1");
+  (import.meta.env.VITE_API_BASE as string) || "https://api.saby.ai/v1";
 
 // API Endpoints from environment variables
 export const API_ENDPOINTS = {
@@ -23,6 +21,7 @@ export const API_ENDPOINTS = {
   USER: import.meta.env.VITE_API_USER_ENDPOINT || "/user",
   NODE: import.meta.env.VITE_API_NODE_ENDPOINT || "/node",
   FORMS: import.meta.env.VITE_API_FORMS_ENDPOINT || "/project-forms",
+  CHECK_API_KEY_STATUS: "/auth/check-api-key-status",
 };
 
 const LOCAL_REFRESH_KEY =
@@ -49,108 +48,30 @@ export function createAPI(
   // Also attach global API key conditionally based on login mode (for login requests).
   api.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
     try {
-      // First, attach access token if available (takes priority)
+      if (!config.headers) {
+        return config;
+      }
+
+      // Removed: API key attachment for login requests
+      // All registered users can login without API key requirement
+      // API keys are no longer part of authentication flow
+
+      // Attach access token if available
       const token = getAccessToken ? getAccessToken() : null;
-      if (token && config.headers) {
+      if (token) {
         (config.headers as Record<string, string>)[
           "Authorization"
         ] = `Bearer ${token}`;
       }
 
-      // If no access token, conditionally attach global API key based on login mode
-      // API key is only added for "user" mode login requests, not for "admin" mode
-      if (!token && config.headers) {
-        // Check if this is a login request
-        // Match various login endpoint formats (relative, absolute, with/without base)
-        const url = config.url || "";
-        const authEndpoint = API_ENDPOINTS.AUTH || "/auth/login";
-        const isLoginRequest =
-          url.includes("/auth/login") ||
-          url === authEndpoint ||
-          url.endsWith("/auth/login") ||
-          url.includes("auth/login") ||
-          (authEndpoint.startsWith("/") && url.endsWith(authEndpoint)) ||
-          (authEndpoint.startsWith("/") &&
-            url.includes(authEndpoint.replace("/", "")));
-
-        // Debug logging for login requests
-        if (isLoginRequest) {
-          const loginMode = getLoginModeSync();
-          const shouldAdd = shouldAddApiKeyToLogin();
-          const apiKey = getApiKeySync();
-
-          console.log("[API Interceptor] Login Request Debug:", {
-            url: config.url,
-            loginMode,
-            shouldAddApiKey: shouldAdd,
-            hasApiKey: !!apiKey,
-            apiKeyPreview: apiKey ? `${apiKey.substring(0, 10)}...` : "none",
-          });
-        }
-
-        // Only add API key if:
-        // 1. It's a login request AND
-        // 2. Login mode is "user" (not "admin")
-        if (isLoginRequest && shouldAddApiKeyToLogin()) {
-          // Try cache first (fast, synchronous)
-          let globalApiKey = getApiKeySync();
-
-          // Fallback: if cache is empty, fetch from IndexedDB asynchronously
-          if (!globalApiKey) {
-            console.warn(
-              "[API Interceptor] ⚠️ Cache empty, attempting async fetch from IndexedDB..."
-            );
-            try {
-              // Use dynamic import with Promise chain to avoid esbuild async/await issues
-              const apiKeyModule = await import("./apiKeyStorage");
-              const fetchedKey = await apiKeyModule.getApiKey();
-
-              if (fetchedKey) {
-                apiKeyModule.updateApiKeyCache(fetchedKey);
-                globalApiKey = fetchedKey;
-                console.log(
-                  "[API Interceptor] ✅ Fetched and cached API key from IndexedDB"
-                );
-              }
-            } catch (error) {
-              console.error(
-                "[API Interceptor] ❌ Failed to fetch API key from IndexedDB:",
-                error
-              );
-            }
-          }
-
-          if (globalApiKey) {
-            // Add API key as a custom header
-            (config.headers as Record<string, string>)["X-API-Key"] =
-              globalApiKey;
-
-            console.log(
-              "[API Interceptor] ✅ Added API key to login request (User mode)",
-              {
-                header: "X-API-Key",
-                keyPreview: `${globalApiKey.substring(0, 10)}...`,
-                source:
-                  getApiKeySync() === globalApiKey ? "cache" : "IndexedDB",
-              }
-            );
-          } else {
-            console.error(
-              "[API Interceptor] ❌ No API key available for login! Check Admin Settings."
-            );
-          }
-        } else if (isLoginRequest && !shouldAddApiKeyToLogin()) {
-          // Admin mode - don't add API key
-          console.log(
-            "[API Interceptor] ⏭️ Skipping API key for login request (Admin mode)"
-          );
-        } else {
-          // Not a login request - add API key if available (for other unauthenticated calls)
-          const globalApiKey = getApiKeySync();
-          if (globalApiKey) {
-            (config.headers as Record<string, string>)["X-API-Key"] =
-              globalApiKey;
-          }
+      // For requests without token, add API key if available (for non-auth endpoints only)
+      // Do NOT add API key to auth endpoints (login, refresh, logout)
+      const isAuthEndpoint = config.url?.includes("/auth/") || false;
+      if (!token && !isAuthEndpoint) {
+        const globalApiKey = getApiKeySync();
+        if (globalApiKey) {
+          (config.headers as Record<string, string>)["X-API-Key"] =
+            globalApiKey;
         }
       }
 
@@ -179,15 +100,25 @@ export function createAPI(
   // Cooldown/backoff for 429 responses to avoid spamming the refresh endpoint
   let refreshCooldownUntil = 0; // timestamp ms until which we won't attempt refresh
   let refreshBackoffMs = 10000; // initial backoff 10s
-  const REFRESH_BACKOFF_MAX = 120000; // max 2 minutes
+  const REFRESH_BACKOFF_MAX = 2000000; // max 2000 seconds (~33 minutes)
+
+  // Rate limit configuration (requests per minute)
+  // Note: Actual rate limiting is enforced by the backend API server
+  // This value is for reference and can be used for client-side throttling if needed
+  const RATE_LIMIT_RPM = ENV_CONFIG.RATE_LIMIT_REQUESTS_PER_MINUTE; // Default: 2000 requests per minute
 
   const inCooldown = () => Date.now() < refreshCooldownUntil;
 
   // doRefresh is the single place that actually calls the refresh endpoint and applies backoff on 429
   const doRefresh = async () => {
+    console.log("[🔍 TOKEN TRACK] Token refresh attempt started");
+
     if (inCooldown()) {
       const err: any = new Error("Refresh cooldown");
       err.status = 429;
+      console.log(
+        "[🔍 TOKEN TRACK] ❌ Token refresh blocked - cooldown active"
+      );
       throw err;
     }
     try {
@@ -195,19 +126,47 @@ export function createAPI(
       const refreshToken = getRefreshToken ? getRefreshToken() : null;
       // Temporary fallback: if we don't have an in-memory refresh token but a legacy localStorage key exists,
       // include it in the body. This helps during migration; we avoid writing to localStorage in new code paths.
-      const legacy =
-        typeof localStorage !== "undefined"
-          ? localStorage.getItem(LOCAL_REFRESH_KEY)
-          : null;
+      let legacy: string | null = null;
+      try {
+        if (typeof localStorage !== "undefined") {
+          legacy = localStorage.getItem(LOCAL_REFRESH_KEY);
+        }
+      } catch (e) {
+        // localStorage may be unavailable on some mobile browsers (private mode, etc.)
+        if (import.meta.env.DEV) {
+          console.debug(
+            "[api] localStorage unavailable for refresh token fallback"
+          );
+        }
+      }
+
+      console.log("[🔍 TOKEN TRACK] Token refresh - checking tokens:", {
+        refreshToken: {
+          inMemory: refreshToken ? `${refreshToken.substring(0, 20)}...` : null,
+          inMemoryExists: !!refreshToken,
+        },
+        legacy: {
+          inLocalStorage: legacy ? `${legacy.substring(0, 20)}...` : null,
+          inLocalStorageExists: !!legacy,
+        },
+        willUse: refreshToken ? "in-memory" : legacy ? "localStorage" : "none",
+      });
 
       // If no refreshToken is available, don't attempt refresh - backend requires it
       if (!refreshToken && !legacy) {
         const err: any = new Error("No refresh token available");
         err.status = 401;
+        console.log(
+          "[🔍 TOKEN TRACK] ❌ Token refresh failed - no refresh token available"
+        );
         throw err;
       }
 
       const body = refreshToken ? { refreshToken } : { refreshToken: legacy };
+      console.log(
+        "[🔍 TOKEN TRACK] Sending refresh request with token from:",
+        refreshToken ? "memory" : "localStorage"
+      );
 
       const resp = await axios.post(
         `${API_BASE}${API_ENDPOINTS.REFRESH}`,
@@ -217,16 +176,41 @@ export function createAPI(
           headers: { "Content-Type": "application/json" },
         }
       );
+
+      console.log("[🔍 TOKEN TRACK] ✅ Token refresh successful:", {
+        status: resp.status,
+        hasNewAccessToken: !!(
+          resp.data?.access?.token ||
+          resp.data?.access_token ||
+          resp.data?.token
+        ),
+        hasNewRefreshToken: !!(
+          resp.data?.refresh?.token ||
+          resp.data?.refresh_token ||
+          resp.data?.refreshToken
+        ),
+      });
+
       // reset backoff on success
       refreshBackoffMs = 10000;
       refreshCooldownUntil = 0;
       return resp;
     } catch (e: any) {
       const status = e?.response?.status ?? null;
+      console.log("[🔍 TOKEN TRACK] ❌ Token refresh failed:", {
+        status,
+        message: e?.message,
+        responseData: e?.response?.data,
+      });
+
       if (status === 429) {
         // apply exponential backoff
         refreshCooldownUntil = Date.now() + refreshBackoffMs;
         refreshBackoffMs = Math.min(refreshBackoffMs * 2, REFRESH_BACKOFF_MAX);
+        console.log("[🔍 TOKEN TRACK] Rate limited - applying backoff:", {
+          backoffMs: refreshBackoffMs,
+          cooldownUntil: new Date(refreshCooldownUntil).toISOString(),
+        });
       }
       throw e;
     }
@@ -283,66 +267,8 @@ export function createAPI(
     );
   };
 
-  // Helper function to check if error indicates API key approval needed
-  const isApiKeyApprovalNeeded = (error: AxiosError): boolean => {
-    const errorData = error.response?.data as any;
-
-    // Check response status - 403 often indicates API key issues
-    const isForbidden = error.response?.status === 403;
-
-    // Get error message from various possible locations
-    const errorMessage = (
-      errorData?.message ||
-      errorData?.error ||
-      errorData?.msg ||
-      error.message ||
-      ""
-    ).toLowerCase();
-
-    // Check for API key approval-related keywords (case-insensitive)
-    const approvalKeywords = [
-      "pending approval",
-      "api key.*pending",
-      "wait for.*approval",
-      "sabyuser approval",
-      "approval.*required",
-      "key.*pending",
-      "production api key is pending",
-      "please wait for.*approval",
-    ];
-
-    const hasApprovalKeyword = approvalKeywords.some((keyword) => {
-      const regex = new RegExp(keyword, "i");
-      return regex.test(errorMessage);
-    });
-
-    // Check for specific error codes
-    const approvalErrorCode =
-      errorData?.code === "API_KEY_PENDING_APPROVAL" ||
-      errorData?.errorCode === "API_KEY_PENDING_APPROVAL" ||
-      errorData?.code === "API_KEY_APPROVAL_REQUIRED";
-
-    // Also check if it's a 403 and message contains "api key"
-    const isApiKeyError =
-      isForbidden &&
-      (errorMessage.includes("api key") ||
-        errorMessage.includes("apikey") ||
-        errorMessage.includes("api-key"));
-
-    const result = hasApprovalKeyword || approvalErrorCode || isApiKeyError;
-
-    if (import.meta.env.DEV && result) {
-      console.debug("[isApiKeyApprovalNeeded] Detected approval error:", {
-        status: error.response?.status,
-        message: errorMessage,
-        hasKeyword: hasApprovalKeyword,
-        hasCode: approvalErrorCode,
-        isApiKeyError,
-      });
-    }
-
-    return result;
-  };
+  // Removed: isApiKeyApprovalNeeded helper function
+  // API keys are no longer part of authentication flow
 
   api.interceptors.response.use(
     async (res) => {
@@ -368,80 +294,111 @@ export function createAPI(
           console.warn("[API] Failed to log API call:", error);
         }
       }
+
+      // Extract and store rate limit info
+      const rateLimitInfo = extractRateLimitInfo(res);
+      if (rateLimitInfo) {
+        // Store in a way that components can access
+        (res as any).rateLimitInfo = rateLimitInfo;
+      }
+
       return res;
     },
     async (err: AxiosError & { config?: CustomRequestConfig }) => {
-      // Log failed API call to database
-      try {
-        const config = err.config as any;
-        const duration = config?.metadata?.startTime
-          ? Date.now() - config.metadata.startTime
-          : undefined;
-
-        await db.apiCalls.add({
-          endpoint: err.config?.url || "",
-          method: (err.config?.method || "GET").toUpperCase(),
-          status: err.response?.status || 0,
-          statusText: err.response?.statusText || "Network Error",
-          error: err.message,
-          timestamp: new Date(),
-          duration: duration,
-        });
-      } catch (error) {
-        // Silently fail logging - don't break error handling
-        if (import.meta.env.DEV) {
-          console.warn("[API] Failed to log API call error:", error);
-        }
-      }
       const originalConfig = err.config;
       if (!originalConfig) return Promise.reject(err);
 
-      // Check if error indicates API key approval needed (FIRST - before any other checks)
-      // This MUST prevent authentication - check multiple ways to ensure detection
-      const errorData = err.response?.data as any;
-      const errorMessage = (
-        errorData?.message ||
-        errorData?.error ||
-        errorData?.msg ||
-        err.message ||
-        ""
-      ).toLowerCase();
+      // Handle CORS errors gracefully - these are backend configuration issues
+      // Check if this is a CORS error (no response, network error, or specific CORS message)
+      const errorMessage = err.message?.toLowerCase() || "";
+      const isCorsError =
+        !err.response &&
+        (errorMessage.includes("cors") ||
+          errorMessage.includes("access-control") ||
+          errorMessage.includes("preflight") ||
+          errorMessage.includes("access-control-allow-origin") ||
+          err.code === "ERR_NETWORK" ||
+          err.code === "ERR_FAILED");
 
-      const is403 = err.response?.status === 403;
-      const hasApprovalMessage =
-        errorMessage.includes("pending approval") ||
-        (errorMessage.includes("wait for") &&
-          errorMessage.includes("approval")) ||
-        errorMessage.includes("sabyuser approval");
-
-      // Check if this is an API key approval error
-      if (isApiKeyApprovalNeeded(err) || (is403 && hasApprovalMessage)) {
-        const finalErrorMessage =
-          errorData?.message ||
-          errorData?.error ||
-          errorData?.msg ||
-          "This production API key is pending approval. Please wait for SabyUser approval before using it.";
-
-        console.error(
-          "[API Interceptor] ❌ API KEY APPROVAL REQUIRED - BLOCKING AUTHENTICATION",
-          {
-            status: err.response?.status,
-            message: finalErrorMessage,
-            url: err.config?.url,
-            isLoginRequest: err.config?.url?.includes("/auth/login"),
+      if (isCorsError) {
+        const endpoint = originalConfig.url || "";
+        // Silently handle CORS errors for optional endpoints (like /storage/stats)
+        // These might not be available or configured on the backend
+        // NOTE: This is a backend CORS configuration issue. The backend needs to:
+        // 1. Add the frontend origin (https://stg.saby.ai) to allowed CORS origins
+        // 2. Include 'Access-Control-Allow-Origin' header in the response
+        // 3. Handle preflight OPTIONS requests properly
+        if (endpoint.includes("/storage/stats")) {
+          if (import.meta.env.DEV) {
+            console.debug(
+              "[API] CORS error for /storage/stats - endpoint may not be configured on backend. " +
+                "Backend needs to allow CORS from https://stg.saby.ai"
+            );
           }
-        );
+          // Return a rejected promise with a silent error that won't show toasts
+          const corsError: any = new Error("CORS: Endpoint not available");
+          corsError.isCorsError = true;
+          corsError.silent = true; // Flag to prevent toast notifications
+          return Promise.reject(corsError);
+        }
 
-        // CRITICAL: Reject immediately - this prevents login from succeeding
-        const approvalError: any = new Error(finalErrorMessage);
-        approvalError.isApiKeyApprovalNeeded = true;
-        approvalError.status = err.response?.status || 403;
-        approvalError.response = err.response;
-        approvalError.config = err.config;
-
-        // Ensure this error is not caught by token refresh logic
-        return Promise.reject(approvalError);
+        // For other CORS errors, log in dev but don't spam console
+        if (import.meta.env.DEV) {
+          console.warn(
+            `[API] CORS error for ${endpoint}:`,
+            err.message || "CORS policy blocked request"
+          );
+        }
       }
+
+      // Log failed API call to database (skip for silent CORS errors)
+      if (!isCorsError || !originalConfig.url?.includes("/storage/stats")) {
+        try {
+          const config = err.config as any;
+          const duration = config?.metadata?.startTime
+            ? Date.now() - config.metadata.startTime
+            : undefined;
+
+          await db.apiCalls.add({
+            endpoint: err.config?.url || "",
+            method: (err.config?.method || "GET").toUpperCase(),
+            status: err.response?.status || 0,
+            statusText: err.response?.statusText || "Network Error",
+            error: err.message,
+            timestamp: new Date(),
+            duration: duration,
+          });
+        } catch (error) {
+          // Silently fail logging - don't break error handling
+          if (import.meta.env.DEV) {
+            console.warn("[API] Failed to log API call error:", error);
+          }
+        }
+      }
+
+      // Handle 429 Rate Limit errors (before other error checks)
+      if (err.response?.status === 429) {
+        const rateLimitInfo = extractRateLimitInfo(err.response);
+        const errorData = err.response?.data as any;
+
+        // Create enhanced error with rate limit info
+        const rateLimitError: any = new Error(
+          errorData?.message ||
+            errorData?.error?.message ||
+            "Too many requests. Please try again later."
+        );
+        rateLimitError.status = 429;
+        rateLimitError.rateLimitInfo = rateLimitInfo;
+        rateLimitError.retryAfter = rateLimitInfo
+          ? getSecondsUntilReset(rateLimitInfo)
+          : undefined;
+        rateLimitError.isRateLimitError = true;
+
+        return Promise.reject(rateLimitError);
+      }
+
+      // Removed: API key approval error checking
+      // API keys are no longer part of authentication flow
 
       // Check if 401 error indicates verification needed (before attempting refresh)
       if (err.response?.status === 401 && isVerificationNeeded(err)) {
@@ -467,8 +424,30 @@ export function createAPI(
       }
 
       // On 401 attempt one refresh (cookie-based). If it fails, call onAuthFailure (logout) and reject.
-      if (err.response?.status === 401 && !originalConfig._retry) {
+      // EXCEPTION: Don't attempt refresh for logout requests - if logout fails, just ignore it
+      const isLogoutRequest =
+        originalConfig.url?.includes(API_ENDPOINTS.LOGOUT) || false;
+
+      if (
+        err.response?.status === 401 &&
+        !originalConfig._retry &&
+        !isLogoutRequest
+      ) {
+        console.log(
+          "[🔍 TOKEN TRACK] 401 Unauthorized detected - checking for refresh token"
+        );
+        console.log("[🔍 TOKEN TRACK] Request that failed:", {
+          url: originalConfig.url,
+          method: originalConfig.method,
+          endpoint: originalConfig.url?.includes("/auth/")
+            ? "auth endpoint"
+            : "protected endpoint",
+        });
+
         if (isRefreshing) {
+          console.log(
+            "[🔍 TOKEN TRACK] Refresh already in progress - queuing request"
+          );
           return new Promise((resolve, reject) => {
             failedQueue.push({ resolve, reject, config: originalConfig });
           }).then(() => api.request(originalConfig));
@@ -478,6 +457,52 @@ export function createAPI(
         isRefreshing = true;
 
         try {
+          // Check if refresh token exists before attempting refresh
+          const refreshToken = getRefreshToken ? getRefreshToken() : null;
+          let legacy: string | null = null;
+          try {
+            if (typeof localStorage !== "undefined") {
+              legacy = localStorage.getItem(LOCAL_REFRESH_KEY);
+            }
+          } catch (e) {
+            // localStorage unavailable
+          }
+
+          console.log("[🔍 TOKEN TRACK] 401 handler - refresh token check:", {
+            refreshToken: {
+              inMemory: refreshToken
+                ? `${refreshToken.substring(0, 20)}...`
+                : null,
+              inMemoryExists: !!refreshToken,
+            },
+            legacy: {
+              inLocalStorage: legacy ? `${legacy.substring(0, 20)}...` : null,
+              inLocalStorageExists: !!legacy,
+            },
+            willAttemptRefresh: !!(refreshToken || legacy),
+          });
+
+          // If no refresh token, immediately call onAuthFailure (terminal state)
+          if (!refreshToken && !legacy) {
+            console.log(
+              "[🔍 TOKEN TRACK] ❌ No refresh token available - triggering logout"
+            );
+            isRefreshing = false;
+            processQueue(err);
+            if (typeof onAuthFailure === "function") {
+              try {
+                onAuthFailure();
+              } catch (e) {
+                // ignore errors from callback
+              }
+            }
+            return Promise.reject(err);
+          }
+
+          console.log(
+            "[🔍 TOKEN TRACK] ✅ Refresh token found - attempting token refresh"
+          );
+
           // Use the guarded doRefresh which applies cooldown/backoff on 429
           const resp = await doRefresh();
 
@@ -490,14 +515,43 @@ export function createAPI(
               data?.access_token ??
               data?.token ??
               null;
-            if (newAccess && typeof setAccessToken === "function")
+            const newRefresh =
+              data?.refresh?.token ??
+              data?.tokens?.refresh?.token ??
+              data?.refresh_token ??
+              data?.refreshToken ??
+              null;
+
+            console.log("[🔍 TOKEN TRACK] Token refresh response received:", {
+              hasNewAccessToken: !!newAccess,
+              hasNewRefreshToken: !!newRefresh,
+              accessTokenPreview: newAccess
+                ? `${newAccess.substring(0, 20)}...`
+                : null,
+              refreshTokenPreview: newRefresh
+                ? `${newRefresh.substring(0, 20)}...`
+                : null,
+            });
+
+            if (newAccess && typeof setAccessToken === "function") {
               setAccessToken(newAccess);
+              console.log("[🔍 TOKEN TRACK] ✅ Updated access token in memory");
+            }
+
+            // Note: New refresh token will be handled by handleSuccessfulAuth callback
           } catch (e) {
             // ignore parsing errors
+            console.log(
+              "[🔍 TOKEN TRACK] ⚠️ Error parsing refresh response:",
+              e
+            );
           }
 
           processQueue(null);
           isRefreshing = false;
+          console.log(
+            "[🔍 TOKEN TRACK] ✅ Token refresh complete - retrying original request"
+          );
 
           // Retry the original request once after refresh
           // Update Authorization header with new token
@@ -509,12 +563,26 @@ export function createAPI(
           }
           return api.request(originalConfig);
         } catch (refreshErr) {
+          console.log(
+            "[🔍 TOKEN TRACK] ❌ Token refresh failed in 401 handler:",
+            {
+              status: (refreshErr as any)?.response?.status,
+              message: (refreshErr as any)?.message,
+              willTriggerLogout: true,
+            }
+          );
+
           processQueue(refreshErr);
           isRefreshing = false;
 
           // Notify caller to clear session state (frontend should clear in-memory user state)
           try {
-            if (typeof onAuthFailure === "function") onAuthFailure();
+            if (typeof onAuthFailure === "function") {
+              console.log(
+                "[🔍 TOKEN TRACK] Calling onAuthFailure callback (will trigger logout)"
+              );
+              onAuthFailure();
+            }
           } catch (e) {
             // ignore errors from callback
           }
@@ -563,7 +631,7 @@ if (import.meta.env.DEV) {
       if (!resp.ok) {
         if (resp.status === 401) {
           console.warn(
-            "[debug] cookie-refresh failed: 401 Unauthorized — cookie missing or invalid",
+            "[debug] cookie-refresh failed: 401 Unauthorized — cookie missing or invalid"
           );
         } else if (resp.status === 404) {
           console.warn("[debug] cookie-refresh endpoint not found (404)");
@@ -571,7 +639,7 @@ if (import.meta.env.DEV) {
           console.warn(
             "[debug] cookie-refresh returned",
             resp.status,
-            await resp.text(),
+            await resp.text()
           );
         }
         return { ok: false, status: resp.status };
@@ -587,11 +655,11 @@ if (import.meta.env.DEV) {
       );
       if (hasAccess) {
         console.log(
-          "[debug] cookie-refresh succeeded — cookies are working and server returned new tokens",
+          "[debug] cookie-refresh succeeded — cookies are working and server returned new tokens"
         );
       } else {
         console.log(
-          "[debug] cookie-refresh succeeded (200) — server did not return token in body; server may be using cookies to rotate refresh token",
+          "[debug] cookie-refresh succeeded (200) — server did not return token in body; server may be using cookies to rotate refresh token"
         );
       }
       return { ok: true, status: resp.status, data };

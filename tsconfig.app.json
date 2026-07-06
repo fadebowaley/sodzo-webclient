@@ -13,6 +13,21 @@
     "moduleDetection": "force",
     "noEmit": true,
     "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@haloform/ui/*": [
+        "../sabyFrontend/packages/isomorphic-core/src/components/haloform/ui/*"
+      ],
+      "@haloform/types/*": [
+        "../sabyFrontend/packages/isomorphic-core/types/*"
+      ],
+      "@haloform/lib/*": [
+        "../sabyFrontend/packages/isomorphic-core/src/components/haloform/lib/*"
+      ],
+      "@haloform/FormBuilder/*": [
+        "../sabyFrontend/packages/isomorphic-core/src/components/haloform/FormBuilder/*"
+      ]
+    },
 
     /* Linting */
     "strict": true,

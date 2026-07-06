@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Globe,
   Edit3,
@@ -9,8 +10,7 @@ import {
   Camera,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
-import { useUser } from "../contexts/UserContext";
-import type { User as UserModel } from "../contexts/UserContext";
+import type { User } from "../contexts/AuthContext";
 import toast from "react-hot-toast";
 import {
   mapNodeProfileToFields,
@@ -21,117 +21,188 @@ import {
 import DynamicFormRenderer from "../components/Forms/DynamicFormRenderer";
 
 export default function NodeProfileClean() {
-  const { api, logout, user: authUser } = useAuth();
-  const { user: userContextUser } = useUser();
-  const [nodes, setNodes] = useState<any[]>([]);
+  const queryClient = useQueryClient();
+  const { api, logout, user } = useAuth();
   const [selectedNode, setSelectedNode] = useState<any>(null);
-  const [nodeData, setNodeData] = useState<any>(null);
-  const [formFields, setFormFields] = useState<FormField[]>([]);
   const [formValues, setFormValues] = useState<Record<string, any>>({});
-  const [loading, setLoading] = useState(true);
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Get user ID from context - prefer AuthContext, fallback to UserContext
-  const user: Partial<UserModel> | null =
-    (authUser as unknown as Partial<UserModel>) ?? userContextUser ?? null;
+  // Get user ID from AuthContext (now supports full user model)
   const userId = user?.id;
 
-  // Fetch nodes on mount
+  // Fetch nodes using React Query
+  const {
+    data: nodes = [],
+    isLoading: nodesLoading,
+    error: nodesError,
+  } = useQuery({
+    queryKey: ["userNodes", userId],
+    queryFn: async () => {
+      if (!userId) return [];
+
+      const res = await api.get(`/users/${userId}/nodes`);
+      const data = res.data?.results || res.data || [];
+
+      // Auto-select first node if available
+      if (data.length > 0 && !selectedNode) {
+        setSelectedNode(data[0]);
+      }
+
+      return data;
+    },
+    enabled: !!userId,
+    retry: (failureCount, error: any) => {
+      // Don't retry on 401 errors
+      if (error?.response?.status === 401) {
+        logout();
+        toast.error("Session expired — please sign in again");
+        return false;
+      }
+      return failureCount < 2; // Retry up to 2 times
+    },
+  });
+
+  // Handle nodes error
   useEffect(() => {
-    const fetchNodes = async () => {
-      if (!userId) {
-        setLoading(false);
-        return;
+    if (nodesError) {
+      const axiosError = nodesError as any;
+      if (axiosError.response?.status !== 401) {
+        toast.error("Failed to load church information");
+        console.error("Nodes fetch error:", nodesError);
       }
+    }
+  }, [nodesError, logout]);
 
-      try {
-        setLoading(true);
-        const res = await api.get(`/users/${userId}/nodes`);
-        const data = res.data?.results || res.data || [];
-        setNodes(data);
-        if (data.length > 0) {
-          setSelectedNode(data[0]);
-        }
-      } catch (err: any) {
-        if (err.response?.status === 401) {
-          logout();
-          toast.error("Session expired — please sign in again");
-        } else {
-          toast.error("Failed to load church information");
-        }
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchNodes();
-  }, [userId, api, logout]);
-
-  // When a node is selected, fetch its full details and generate form fields
+  // Auto-select first node when nodes are loaded
   useEffect(() => {
-    const loadNodeDetails = async () => {
-      if (!selectedNode || !selectedNode.id) {
-        setNodeData(null);
-        setFormFields([]);
-        setFormValues({});
-        return;
+    if (nodes.length > 0 && !selectedNode) {
+      setSelectedNode(nodes[0]);
+    }
+  }, [nodes, selectedNode]);
+
+  // Fetch node details when a node is selected using React Query
+  const {
+    data: nodeDetailsData,
+    isLoading: nodeDetailsLoading,
+    error: nodeDetailsError,
+  } = useQuery({
+    queryKey: ["nodeDetails", selectedNode?.id],
+    queryFn: async () => {
+      if (!selectedNode?.id) return null;
+
+      // Fetch both schema and actual node data in parallel
+      const [schemaResponse, dataResponse] = await Promise.all([
+        api.get(`/schema/node`).catch(() => null), // Schema is optional
+        api.get(`/node/${selectedNode.id}/branch`),
+      ]);
+
+      const fullNodeData = dataResponse.data;
+      const schemaData = schemaResponse?.data?.data || null;
+
+      // Use schema if available, otherwise fallback to data-driven mapping
+      let fields: FormField[] = [];
+      if (schemaData) {
+        // Use schema-based mapping for accurate field definitions
+        fields = mapNodeSchemaToFields(schemaData, fullNodeData);
+      } else {
+        // Fallback to data-driven mapping
+        fields = mapNodeProfileToFields(fullNodeData);
       }
 
-      try {
-        setLoading(true);
-
-        // Fetch both schema and actual node data in parallel
-        const [schemaResponse, dataResponse] = await Promise.all([
-          api.get(`/schema/node`).catch(() => null), // Schema is optional
-          api.get(`/node/${selectedNode.id}`),
-        ]);
-
-        const fullNodeData = dataResponse.data;
-        setNodeData(fullNodeData);
-
-        // Use schema if available, otherwise fallback to data-driven mapping
-        let fields: FormField[] = [];
-        if (schemaResponse?.data?.data) {
-          // Use schema-based mapping for accurate field definitions
-          fields = mapNodeSchemaToFields(
-            schemaResponse.data.data,
-            fullNodeData
-          );
-        } else {
-          // Fallback to data-driven mapping
-          fields = mapNodeProfileToFields(fullNodeData);
-        }
-
-        setFormFields(fields);
-
-        // Initialize form values from node data
-        const initialValues: Record<string, any> = {};
-        fields.forEach((field) => {
-          // Get nested value from nodeData (e.g., "customFields.title" -> nodeData.customFields.title)
-          const value = getNestedValue(fullNodeData, field.name);
-          // Store as flat key for formValues (e.g., "customFields.title" as key)
-          initialValues[field.name] =
-            value !== undefined && value !== null
-              ? value
-              : field.value !== undefined && field.value !== null
-              ? field.value
-              : "";
-        });
-        setFormValues(initialValues);
-      } catch (err: any) {
-        if (err.response?.status === 401) {
-          logout();
-          toast.error("Session expired — please sign in again");
-        } else {
-          toast.error("Failed to load node details");
-        }
-      } finally {
-        setLoading(false);
+      return {
+        nodeData: fullNodeData,
+        formFields: fields,
+        schemaData,
+      };
+    },
+    enabled: !!selectedNode?.id,
+    retry: (failureCount, error: any) => {
+      // Don't retry on 401 errors
+      if (error?.response?.status === 401) {
+        logout();
+        toast.error("Session expired — please sign in again");
+        return false;
       }
-    };
+      return failureCount < 2; // Retry up to 2 times
+    },
+  });
 
-    loadNodeDetails();
-  }, [selectedNode, api, logout]);
+  // Extract data from query result
+  const nodeData = nodeDetailsData?.nodeData || null;
+  const formFields = nodeDetailsData?.formFields || [];
+  const loading = nodesLoading || nodeDetailsLoading;
+
+  // Handle node details error
+  useEffect(() => {
+    if (nodeDetailsError) {
+      const axiosError = nodeDetailsError as any;
+      if (axiosError.response?.status !== 401) {
+        toast.error("Failed to load node details");
+        console.error("Node details fetch error:", nodeDetailsError);
+      }
+    }
+  }, [nodeDetailsError, logout]);
+
+  // Reset form when no node is selected
+  useEffect(() => {
+    if (!selectedNode?.id) {
+      setFormValues({});
+    }
+  }, [selectedNode]);
+
+  // Initialize form values when node data is loaded
+  useEffect(() => {
+    if (!nodeData || formFields.length === 0 || !selectedNode?.id) return;
+
+    // Restore from localStorage draft if available
+    const storageKey = `node_profile_draft_${selectedNode.id}`;
+    let savedDraft: Record<string, any> | null = null;
+    try {
+      const draftData = localStorage.getItem(storageKey);
+      if (draftData) {
+        savedDraft = JSON.parse(draftData);
+      }
+    } catch (e) {
+      // localStorage may be unavailable or corrupted, ignore
+      if (import.meta.env.DEV) {
+        console.warn(
+          "[NodeProfile] Failed to load draft from localStorage:",
+          e
+        );
+      }
+    }
+
+    // Initialize form values - merge existing values (if editing) with saved draft and new fields
+    setFormValues((prevValues) => {
+      // If we're editing, preserve existing values; otherwise start fresh
+      const baseValues = isEditing ? prevValues : {};
+      const initialValues: Record<string, any> = { ...baseValues };
+
+      formFields.forEach((field) => {
+        // Only set value if it doesn't already exist (preserves user input when editing)
+        if (initialValues[field.name] === undefined) {
+          // First check if we have a saved draft value for this field
+          if (savedDraft && savedDraft[field.name] !== undefined) {
+            initialValues[field.name] = savedDraft[field.name];
+          } else {
+            // Otherwise, get nested value from nodeData
+            const value = getNestedValue(nodeData, field.name);
+            initialValues[field.name] =
+              value !== undefined && value !== null
+                ? value
+                : field.value !== undefined && field.value !== null
+                ? field.value
+                : "";
+          }
+        }
+      });
+
+      return initialValues;
+    });
+    // Note: isEditing is intentionally NOT in dependencies to prevent resetting values during editing
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeData, formFields, selectedNode?.id]);
 
   const getNestedValue = (obj: any, path: string): any => {
     return path.split(".").reduce((current, key) => {
@@ -140,13 +211,43 @@ export default function NodeProfileClean() {
   };
 
   const handleFieldChange = (fieldPath: string, value: any) => {
-    setFormValues((prev) => ({
-      ...prev,
-      [fieldPath]: value,
-    }));
+    setFormValues((prev) => {
+      const updated = {
+        ...prev,
+        [fieldPath]: value,
+      };
+
+      // Persist form values to localStorage as user types
+      if (selectedNode?.id) {
+        try {
+          const storageKey = `node_profile_draft_${selectedNode.id}`;
+          localStorage.setItem(storageKey, JSON.stringify(updated));
+        } catch (e) {
+          // localStorage may be unavailable, ignore
+          if (import.meta.env.DEV) {
+            console.warn(
+              "[NodeProfile] Failed to save draft to localStorage:",
+              e
+            );
+          }
+        }
+      }
+
+      return updated;
+    });
   };
 
   const handleSelect = (nodeId: string) => {
+    // Clear draft for previous node if switching
+    if (selectedNode?.id && selectedNode.id !== nodeId) {
+      try {
+        const storageKey = `node_profile_draft_${selectedNode.id}`;
+        localStorage.removeItem(storageKey);
+      } catch (e) {
+        // ignore
+      }
+    }
+
     const node = nodes.find((n) => n.id === nodeId);
     setSelectedNode(node);
     setIsEditing(false);
@@ -236,13 +337,11 @@ export default function NodeProfileClean() {
         console.log("[NodeProfile] Extracted node data:", updated);
       }
 
-      // Update node data and form fields
+      // Update node data - merge with existing data from cache
       const mergedData = { ...nodeData, ...updated };
-      setNodeData(mergedData);
 
       // Regenerate form fields in case structure changed
       const updatedFields = mapNodeProfileToFields(mergedData);
-      setFormFields(updatedFields);
 
       // Update form values with new data
       const updatedValues: Record<string, any> = {};
@@ -256,11 +355,51 @@ export default function NodeProfileClean() {
       const updatedNodes = nodes.map((n) =>
         n.id === selectedNode.id ? { ...n, ...updated } : n
       );
-      setNodes(updatedNodes);
       setSelectedNode({ ...selectedNode, ...updated });
+
+      // Update React Query cache optimistically with new data
+      // Update node details cache
+      queryClient.setQueryData(
+        ["nodeDetails", selectedNode?.id],
+        (oldData: any) => {
+          if (!oldData) return oldData;
+          return {
+            ...oldData,
+            nodeData: mergedData,
+            formFields: updatedFields,
+          };
+        }
+      );
+
+      // Update nodes list cache
+      queryClient.setQueryData(["userNodes", userId], updatedNodes);
+      queryClient.setQueryData(["nodes", userId], (oldData: any) => {
+        if (!oldData) return oldData;
+        // Update the specific node in the nodes array
+        return oldData.map((node: any) =>
+          node.id === selectedNode.id ? { ...node, ...updated } : node
+        );
+      });
+
+      // Invalidate React Query cache to ensure fresh data on next fetch
+      queryClient.invalidateQueries({
+        queryKey: ["nodeDetails", selectedNode?.id],
+      });
+      queryClient.invalidateQueries({ queryKey: ["userNodes", userId] });
+      queryClient.invalidateQueries({ queryKey: ["nodes", userId] });
 
       toast.success("Node profile updated successfully!");
       setIsEditing(false);
+
+      // Clear the draft from localStorage after successful save
+      if (selectedNode?.id) {
+        try {
+          const storageKey = `node_profile_draft_${selectedNode.id}`;
+          localStorage.removeItem(storageKey);
+        } catch (e) {
+          // ignore
+        }
+      }
     } catch (err: any) {
       console.error("Error saving node:", err);
       console.error("[NodeProfile] Full error details:", {
@@ -298,6 +437,16 @@ export default function NodeProfileClean() {
         resetValues[field.name] = value ?? field.value ?? "";
       });
       setFormValues(resetValues);
+
+      // Clear the draft from localStorage when canceling
+      if (selectedNode?.id) {
+        try {
+          const storageKey = `node_profile_draft_${selectedNode.id}`;
+          localStorage.removeItem(storageKey);
+        } catch (e) {
+          // ignore
+        }
+      }
     }
     setIsEditing(false);
   };

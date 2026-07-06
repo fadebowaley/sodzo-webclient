@@ -4,16 +4,24 @@
  */
 
 import { useState, useEffect } from "react";
-import { User as UserIcon, Camera, Edit3, Save, X, Calendar, Shield } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  User as UserIcon,
+  Camera,
+  Edit3,
+  Save,
+  X,
+  Calendar,
+  Shield,
+} from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
-import { useUser } from "../contexts/UserContext";
-import type { User as UserModel } from "../contexts/UserContext";
+import type { User } from "../contexts/AuthContext";
 import { mockUser } from "../data/mockData";
 import toast from "react-hot-toast";
-import { 
-  mapUserProfileToFields, 
+import {
+  mapUserProfileToFields,
   convertFormValuesToAPIFormat,
-  FormField 
+  FormField,
 } from "../utils/formMapper";
 import DynamicFormRenderer from "../components/Forms/DynamicFormRenderer";
 
@@ -22,56 +30,73 @@ interface DynamicProfileFormProps {
 }
 
 export function DynamicProfileForm({ userId }: DynamicProfileFormProps) {
-  const { api, logout, user: authUser, setUser: setAuthUser } = useAuth();
-  const { user: userContextUser, setUser: setUserContext } = useUser();
-  
-  const [userData, setUserData] = useState<any>(null);
-  const [formFields, setFormFields] = useState<FormField[]>([]);
+  const queryClient = useQueryClient();
+  const { api, logout, user, setUser } = useAuth();
+
   const [formValues, setFormValues] = useState<Record<string, any>>({});
-  const [loading, setLoading] = useState(true);
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Fetch user profile on mount
+  // Fetch user profile using React Query
+  const {
+    data: userProfileData,
+    isLoading: loading,
+    error: profileError,
+  } = useQuery({
+    queryKey: ["userProfile", userId],
+    queryFn: async () => {
+      if (!userId) return null;
+
+      const response = await api.get(`/users/${userId}`);
+      const fullUserData = response.data;
+
+      // Map user data to form fields
+      const fields = mapUserProfileToFields(fullUserData);
+
+      return {
+        userData: fullUserData,
+        formFields: fields,
+      };
+    },
+    enabled: !!userId,
+    retry: (failureCount, error: any) => {
+      // Don't retry on 401 errors
+      if (error?.response?.status === 401) {
+        logout();
+        toast.error("Session expired — please sign in again");
+        return false;
+      }
+      return failureCount < 2; // Retry up to 2 times
+    },
+  });
+
+  // Extract data from query result
+  const userData = userProfileData?.userData || null;
+  const formFields = userProfileData?.formFields || [];
+
+  // Handle errors
   useEffect(() => {
-    const fetchUserProfile = async () => {
-      if (!userId) {
-        setLoading(false);
-        return;
+    if (profileError) {
+      const axiosError = profileError as any;
+      if (axiosError.response?.status !== 401) {
+        toast.error("Failed to load profile");
+        console.error("Profile fetch error:", profileError);
       }
+    }
+  }, [profileError]);
 
-      try {
-        setLoading(true);
-        const response = await api.get(`/users/${userId}`);
-        const fullUserData = response.data;
-        setUserData(fullUserData);
+  // Initialize form values when data is loaded
+  useEffect(() => {
+    if (!userData || formFields.length === 0) return;
 
-        // Map user data to form fields
-        const fields = mapUserProfileToFields(fullUserData);
-        setFormFields(fields);
-
-        // Initialize form values from user data
-        const initialValues: Record<string, any> = {};
-        fields.forEach((field) => {
-          // Get nested value from userData
-          const value = getNestedValue(fullUserData, field.name);
-          initialValues[field.name] = value ?? field.value ?? "";
-        });
-        setFormValues(initialValues);
-      } catch (err: any) {
-        if (err.response?.status === 401) {
-          logout();
-          toast.error("Session expired — please sign in again");
-        } else {
-          toast.error("Failed to load profile");
-        }
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchUserProfile();
-  }, [userId, api, logout]);
+    const initialValues: Record<string, any> = {};
+    formFields.forEach((field) => {
+      // Get nested value from userData
+      const value = getNestedValue(userData, field.name);
+      initialValues[field.name] = value ?? field.value ?? "";
+    });
+    setFormValues(initialValues);
+  }, [userData, formFields]);
 
   const getNestedValue = (obj: any, path: string): any => {
     return path.split(".").reduce((current, key) => {
@@ -96,7 +121,9 @@ export function DynamicProfileForm({ userId }: DynamicProfileFormProps) {
 
       // Ensure token is fresh before saving
       try {
-        const doRefresh = (api as any)?._doRefresh as (() => Promise<any>) | undefined;
+        const doRefresh = (api as any)?._doRefresh as
+          | (() => Promise<any>)
+          | undefined;
         if (doRefresh) {
           await doRefresh();
         } else {
@@ -113,28 +140,47 @@ export function DynamicProfileForm({ userId }: DynamicProfileFormProps) {
       // Update user profile
       const resp = await api.patch(`/users/${userId}`, payload);
       const updated = resp.data as Partial<UserModel>;
-      
-      // Update user data and form fields
+
+      // Update user data - merge with existing data from cache
       const mergedData = { ...userData, ...updated };
-      setUserData(mergedData);
-      
+
       // Regenerate form fields in case structure changed
       const updatedFields = mapUserProfileToFields(mergedData);
-      setFormFields(updatedFields);
 
-      // Update contexts
-      const merged = { ...(userContextUser ?? {}), ...updated } as UserModel;
-      setUserContext(merged);
-      if (typeof setAuthUser === "function") {
-        setAuthUser(merged as unknown as UserModel);
-      }
+      // Update form values with new data
+      const updatedValues: Record<string, any> = {};
+      updatedFields.forEach((field) => {
+        const value = getNestedValue(mergedData, field.name);
+        updatedValues[field.name] = value ?? field.value ?? "";
+      });
+      setFormValues(updatedValues);
+
+      // Update user context (now unified in AuthContext)
+      const merged = { ...(user ?? {}), ...updated } as User;
+      setUser(merged);
+
+      // Update React Query cache optimistically with new data
+      queryClient.setQueryData(["userProfile", userId], (oldData: any) => {
+        if (!oldData) return oldData;
+        return {
+          ...oldData,
+          userData: mergedData,
+          formFields: updatedFields,
+        };
+      });
+
+      // Invalidate React Query cache to ensure fresh data on next fetch
+      queryClient.invalidateQueries({ queryKey: ["userProfile", userId] });
 
       toast.success("Profile updated successfully!");
       setIsEditing(false);
     } catch (err: unknown) {
       let msg = "Update failed";
       if (err instanceof Error) msg = err.message;
-      if (typeof msg === "string" && msg.includes("No refresh token available")) {
+      if (
+        typeof msg === "string" &&
+        msg.includes("No refresh token available")
+      ) {
         logout();
         toast.error("Session expired — please sign in again");
       } else {
@@ -163,7 +209,8 @@ export function DynamicProfileForm({ userId }: DynamicProfileFormProps) {
     );
   }
 
-  const displayName = `${userData.firstname || ""} ${userData.lastname || ""}`.trim() || "User";
+  const displayName =
+    `${userData.firstname || ""} ${userData.lastname || ""}`.trim() || "User";
   const memberSince = userData.createdAt
     ? new Date(userData.createdAt).toLocaleDateString()
     : null;
@@ -188,7 +235,9 @@ export function DynamicProfileForm({ userId }: DynamicProfileFormProps) {
               <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
                 {displayName}
               </h2>
-              <p className="text-gray-600 dark:text-gray-300">{userData.email}</p>
+              <p className="text-gray-600 dark:text-gray-300">
+                {userData.email}
+              </p>
               <div className="flex items-center space-x-4 mt-2">
                 <div className="flex items-center text-sm text-gray-500 dark:text-gray-400">
                   <Calendar className="w-4 h-4 mr-1" />

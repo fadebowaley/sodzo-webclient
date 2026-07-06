@@ -1,295 +1,664 @@
 import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
-import { useUser } from "../contexts/UserContext";
-import type { User as UserModel } from "../contexts/UserContext";
-import {
-  ChevronRight,
-  ChevronDown,
-  Building,
-  MapPin,
-  Users,
-} from "lucide-react";
+import { RefreshCw, AlertCircle, Plus } from "lucide-react";
 import toast from "react-hot-toast";
 import { useDeviceDetection } from "../hooks/useDeviceDetection";
 
-interface Node {
-  id: string;
-  nodeId: string;
-  name: string;
-  address?: string;
-  city?: string;
-  state?: string;
-  country?: string;
-  level?: {
-    id: string;
-    name: string;
-  };
-  structure?: {
-    id: string;
-    name: string;
-  };
-  parent?: string | { id: string; name: string };
-  children?: Node[];
-  isMain?: boolean;
-  isActive?: boolean;
-}
+// Utilities and Components
+import {
+  Node,
+  extractNodesFromResponse,
+  validateNodes,
+  deduplicateNodes,
+  sortNodesHierarchically,
+} from "../utils/networkHelpers";
+import { useNodeOperations } from "../hooks/useNodeOperations";
+import { useUserOperations } from "../hooks/useUserOperations";
+import {
+  Tabs,
+  TabList,
+  Tab,
+  TabPanels,
+  TabPanel,
+} from "../components/Network/Tabs";
+import { NodeTable } from "../components/Network/NodeTable";
+import { UserTable, User } from "../components/Network/UserTable";
+import TurboTab from "../components/Network/TurboTab";
+
+// Modals
+import CreateNodeModal from "../components/Modals/Network/CreateNodeModal";
+import EditNodeModal from "../components/Modals/Network/EditNodeModal";
+import ViewNodeModal from "../components/Modals/Network/ViewNodeModal";
+import AssignUsersToNodeModal from "../components/Modals/Network/AssignUsersToNodeModal";
+import RestoreNodeModal from "../components/Modals/Network/RestoreNodeModal";
+import CreateUserModal from "../components/Modals/Network/CreateUserModal";
+import EditUserModal from "../components/Modals/Network/EditUserModal";
+import AssignNodeToUserModal from "../components/Modals/Network/AssignNodeToUserModal";
+import ManageUserRolesModal from "../components/Modals/Network/ManageUserRolesModal";
 
 export default function Network() {
-  const { api, logout, user: authUser } = useAuth();
-  const { user: userContextUser } = useUser();
+  const { api, logout, user } = useAuth();
   const { isMobile } = useDeviceDetection();
-  const [nodes, setNodes] = useState<Node[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useState<
+    "network" | "turbo" | "users" | "archived"
+  >("network");
 
-  // Get user ID from both contexts
-  const user: Partial<UserModel> | null =
-    (authUser as unknown as Partial<UserModel>) ?? userContextUser ?? null;
-  const userId = user?.id;
+  // Modal states
+  const [createNodeModalOpen, setCreateNodeModalOpen] = useState(false);
+  const [editNodeModalOpen, setEditNodeModalOpen] = useState(false);
+  const [viewNodeModalOpen, setViewNodeModalOpen] = useState(false);
+  const [assignUsersModalOpen, setAssignUsersModalOpen] = useState(false);
+  const [restoreNodeModalOpen, setRestoreNodeModalOpen] = useState(false);
+  const [createUserModalOpen, setCreateUserModalOpen] = useState(false);
+  const [editUserModalOpen, setEditUserModalOpen] = useState(false);
+  const [assignNodeModalOpen, setAssignNodeModalOpen] = useState(false);
+  const [manageRolesModalOpen, setManageRolesModalOpen] = useState(false);
+  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  const [parentNodeId, setParentNodeId] = useState<string | null>(null);
 
-  // Toggle node expansion
-  const toggleNode = (nodeId: string) => {
-    setExpandedNodes((prev) => {
-      const newSet = new Set(prev);
-      if (newSet.has(nodeId)) {
-        newSet.delete(nodeId);
-      } else {
-        newSet.add(nodeId);
-      }
-      return newSet;
-    });
-  };
+  const nodeOps = useNodeOperations();
+  const userOps = useUserOperations();
 
-  // Build hierarchy from flat node list
-  const buildHierarchy = (nodeList: Node[]): Node[] => {
-    const nodeMap = new Map<string, Node>();
-    const rootNodes: Node[] = [];
+  // Get user ID from AuthContext
+  const userId = user?.id || (user as any)?._id;
 
-    // First pass: create map of all nodes
-    nodeList.forEach((node) => {
-      nodeMap.set(node.id, { ...node, children: [] });
-    });
-
-    // Second pass: build parent-child relationships
-    nodeList.forEach((node) => {
-      const nodeWithChildren = nodeMap.get(node.id)!;
-      const parentId =
-        typeof node.parent === "string" ? node.parent : node.parent?.id || null;
-
-      if (parentId && nodeMap.has(parentId)) {
-        const parent = nodeMap.get(parentId)!;
-        if (!parent.children) {
-          parent.children = [];
-        }
-        parent.children.push(nodeWithChildren);
-      } else {
-        // No parent or parent not in list = root node
-        rootNodes.push(nodeWithChildren);
-      }
-    });
-
-    return rootNodes;
-  };
-
-  // Fetch all nodes
-  useEffect(() => {
-    const fetchNodes = async () => {
+  // Fetch nodes using React Query
+  const {
+    data: nodes = [],
+    isLoading: loading,
+    isFetching,
+    error,
+    refetch,
+  } = useQuery({
+    queryKey: ["nodes", "branch", userId],
+    queryFn: async () => {
       if (!userId) {
-        setLoading(false);
-        return;
-      }
-
-      try {
-        setLoading(true);
-        // Fetch user's nodes
-        const res = await api.get(`/users/${userId}/nodes`);
-        const userNodes = res.data?.results || res.data || [];
-
-        // Fetch full details for each node to get hierarchy info
-        const nodesWithDetails = await Promise.all(
-          userNodes.map(async (node: any) => {
-            try {
-              const nodeRes = await api.get(`/node/${node.id}`);
-              return nodeRes.data;
-            } catch (err) {
-              // If individual node fetch fails, use the node from list
-              return node;
-            }
-          })
+        throw new Error(
+          "User ID is required. Please ensure you are logged in."
         );
-
-        setNodes(nodesWithDetails);
-      } catch (err: any) {
-        if (err.response?.status === 401) {
-          logout();
-          toast.error("Session expired — please sign in again");
-        } else {
-          toast.error("Failed to load network");
-          console.error("Network fetch error:", err);
-        }
-      } finally {
-        setLoading(false);
       }
-    };
 
-    fetchNodes();
-  }, [userId, api, logout]);
+      // Fetch user's root nodes
+      let res;
+      try {
+        res = await api.get(`/users/${userId}/nodes`);
+      } catch (error: any) {
+        if (error?.response?.status === 403) {
+          throw new Error(
+            "You don't have permission to view nodes. Please contact your administrator."
+          );
+        }
+        throw error;
+      }
 
-  // Render node tree recursively
-  const renderNodeTree = (
-    nodeList: Node[],
-    level: number = 0
-  ): JSX.Element[] => {
-    return nodeList.map((node) => {
-      const hasChildren = node.children && node.children.length > 0;
-      const isExpanded = expandedNodes.has(node.id);
-      const indentLevel = level * (isMobile ? 16 : 24); // Reduced indent on mobile
+      // Extract user nodes from response
+      const userNodes = extractNodesFromResponse(res.data);
 
-      return (
-        <div key={node.id} className="select-none">
-          {/* Node Item */}
-          <div
-            className={`flex items-center py-2.5 mobile:py-2.5 md:py-3 px-3 mobile:px-3 md:px-4 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-lg transition-all active:bg-gray-100 dark:active:bg-gray-700 ${
-              level === 0
-                ? `border-l-4 ${
-                    isMobile
-                      ? "border-l-4 border-blue-500 mobile-glow"
-                      : "border-blue-500"
-                  }`
-                : ""
-            } ${
-              isMobile && level === 0
-                ? "bg-gradient-to-r from-blue-50/30 to-transparent dark:from-blue-900/10"
-                : ""
-            }`}
-            style={{ paddingLeft: `${(isMobile ? 12 : 16) + indentLevel}px` }}>
-            {/* Expand/Collapse Button */}
-            {hasChildren ? (
-              <button
-                onClick={() => toggleNode(node.id)}
-                className="mr-2 p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors touch-target">
-                {isExpanded ? (
-                  <ChevronDown className="w-4 h-4 text-gray-600 dark:text-gray-400" />
-                ) : (
-                  <ChevronRight className="w-4 h-4 text-gray-600 dark:text-gray-400" />
-                )}
-              </button>
-            ) : (
-              <div className={`${isMobile ? "w-5" : "w-6"} mr-2`} /> // Spacer for alignment
-            )}
+      if (!userNodes || userNodes.length === 0) {
+        return [];
+      }
 
-            {/* Node Icon */}
-            <div className="flex-shrink-0 mr-2 mobile:mr-2 md:mr-3">
-              <Building className="w-4 h-4 mobile:w-4 mobile:h-4 md:w-5 md:h-5 text-blue-600 dark:text-blue-400" />
-            </div>
+      // Fetch branch for each root node
+      const branchResponses = await Promise.all(
+        userNodes.map(async (node: any) => {
+          try {
+            const nodeRes = await api.get(`/node/${node.id}/branch`);
 
-            {/* Node Info */}
-            <div className="flex-1 min-w-0">
-              <div className="flex flex-wrap items-center gap-1.5 mobile:gap-1.5 md:gap-2">
-                <h3 className="text-sm mobile:text-sm md:text-sm font-semibold text-gray-900 dark:text-white truncate flex-1 min-w-0">
-                  {node.name}
-                </h3>
-                {node.isMain && (
-                  <span className="px-1.5 mobile:px-1.5 md:px-2 py-0.5 text-[10px] mobile:text-[10px] md:text-xs font-medium bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded whitespace-nowrap">
-                    Main
-                  </span>
-                )}
-                {node.isActive === false && (
-                  <span className="px-1.5 mobile:px-1.5 md:px-2 py-0.5 text-[10px] mobile:text-[10px] md:text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 rounded whitespace-nowrap">
-                    Inactive
-                  </span>
-                )}
-              </div>
-              <div className="flex flex-col mobile:flex-col md:flex-row md:items-center md:space-x-4 space-y-0.5 mobile:space-y-0.5 md:space-y-0 mt-1">
-                {node.level?.name && (
-                  <div className="flex items-center text-xs text-gray-500 dark:text-gray-400">
-                    <Users className="w-3 h-3 mr-1 flex-shrink-0" />
-                    <span className="truncate">{node.level.name}</span>
-                  </div>
-                )}
-                {(node.address || node.city || node.state) && (
-                  <div className="flex items-center text-xs text-gray-500 dark:text-gray-400">
-                    <MapPin className="w-3 h-3 mr-1 flex-shrink-0" />
-                    <span className="truncate">
-                      {[node.address, node.city, node.state, node.country]
-                        .filter(Boolean)
-                        .join(", ")}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
+            // Extract nodes from branch response
+            const branchNodes = extractNodesFromResponse(nodeRes.data);
 
-          {/* Children */}
-          {hasChildren && isExpanded && (
-            <div
-              className={`${
-                isMobile ? "ml-2" : "ml-4"
-              } border-l-2 border-gray-200 dark:border-gray-700`}>
-              {renderNodeTree(node.children!, level + 1)}
-            </div>
-          )}
-        </div>
+            // Validate nodes (remove wrappers, ensure IDs)
+            return validateNodes(branchNodes);
+          } catch (err: any) {
+            console.error(`Failed to fetch branch for node ${node.id}:`, err);
+            return [];
+          }
+        })
       );
-    });
+
+      // Flatten all branch responses
+      const allBranchNodes = branchResponses.flat();
+
+      // Validate and deduplicate
+      const validNodes = validateNodes(allBranchNodes);
+      const uniqueNodes = deduplicateNodes(validNodes);
+
+      // Sort by path to maintain hierarchy order
+      uniqueNodes.sort((a, b) => {
+        const pathA = a.path || "";
+        const pathB = b.path || "";
+        return pathA.localeCompare(pathB);
+      });
+
+      return uniqueNodes;
+    },
+    enabled: !!userId,
+    staleTime: 10 * 60 * 1000, // 10 minutes
+    gcTime: 24 * 60 * 60 * 1000, // 24 hours
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+    refetchOnReconnect: true,
+    retry: (failureCount, error: any) => {
+      if (error?.response?.status === 401) {
+        logout();
+        toast.error("Session expired — please sign in again");
+        return false;
+      }
+      if (error?.response?.status === 403) {
+        return false;
+      }
+      return failureCount < 2;
+    },
+    retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
+  });
+
+  // Fetch all nodes for table view
+  const {
+    data: allNodesData,
+    isLoading: loadingAllNodes,
+    refetch: refetchAllNodes,
+    error: allNodesError,
+  } = useQuery({
+    queryKey: ["nodes", "all"],
+    queryFn: async () => {
+      const result = await nodeOps.getNodes({ limit: 1000, status: "active" });
+
+      if (result.success && result.data) {
+        // Extract nodes from response - handle multiple formats
+        let nodesArray: Node[] = [];
+
+        if (Array.isArray(result.data)) {
+          nodesArray = result.data;
+        } else if (result.data.results && Array.isArray(result.data.results)) {
+          nodesArray = result.data.results;
+        } else if (result.data.data && Array.isArray(result.data.data)) {
+          nodesArray = result.data.data;
+        } else if (
+          result.data.data?.results &&
+          Array.isArray(result.data.data.results)
+        ) {
+          nodesArray = result.data.data.results;
+        }
+
+        // Validate and process nodes
+        const validNodes = validateNodes(nodesArray);
+        const uniqueNodes = deduplicateNodes(validNodes);
+        const sortedNodes = sortNodesHierarchically(uniqueNodes);
+
+        return sortedNodes;
+      }
+
+      return [];
+    },
+    enabled: activeTab === "network" || activeTab === "archived",
+    retry: 2,
+  });
+
+  // Fetch archived nodes
+  const {
+    data: archivedNodes = [],
+    isLoading: loadingArchived,
+    refetch: refetchArchived,
+  } = useQuery({
+    queryKey: ["nodes", "archived"],
+    queryFn: async () => {
+      const result = await nodeOps.getNodes({
+        limit: 1000,
+        status: "archived",
+      });
+      if (result.success && result.data?.results) {
+        return sortNodesHierarchically(result.data.results);
+      }
+      return [];
+    },
+    enabled: activeTab === "archived",
+  });
+
+  // Fetch users for users tab
+  const {
+    data: usersData,
+    isLoading: loadingUsers,
+    refetch: refetchUsers,
+  } = useQuery({
+    queryKey: ["users", "all"],
+    queryFn: async () => {
+      const result = await userOps.getUsers({ limit: 1000 });
+      if (result.success && result.data?.results) {
+        return result.data.results;
+      }
+      return [];
+    },
+    enabled: activeTab === "users",
+  });
+
+  // Handle errors
+  useEffect(() => {
+    if (error) {
+      const axiosError = error as any;
+      if (
+        axiosError.response?.status !== 401 &&
+        axiosError.response?.status !== 403
+      ) {
+        toast.error("Failed to load network. Please try again.", {
+          id: "network-fetch-error",
+        });
+      }
+    }
+  }, [error]);
+
+  // Refetch data when tab changes
+  useEffect(() => {
+    if (activeTab === "network" || activeTab === "archived") {
+      refetchAllNodes();
+    }
+    if (activeTab === "archived") {
+      refetchArchived();
+    }
+    if (activeTab === "users") {
+      refetchUsers();
+    }
+  }, [activeTab]);
+  // Node action handlers
+  const handleViewNode = (node: Node) => {
+    setSelectedNode(node);
+    setViewNodeModalOpen(true);
   };
 
-  const hierarchicalNodes = buildHierarchy(nodes);
+  const handleEditNode = (node: Node) => {
+    setSelectedNode(node);
+    setEditNodeModalOpen(true);
+  };
 
-  if (loading) {
+  const handleAddChildNode = (node: Node) => {
+    setParentNodeId(node.id);
+    setCreateNodeModalOpen(true);
+  };
+
+  const handleDeleteNode = async (node: Node) => {
+    if (!confirm(`Are you sure you want to delete "${node.name}"?`)) {
+      return;
+    }
+    const result = await nodeOps.deleteNode(node.id);
+    if (result.success) {
+      refetch();
+      if (activeTab === "network") refetchAllNodes();
+      if (activeTab === "archived") refetchArchived();
+    }
+  };
+
+  const handleAssignUsers = (node: Node) => {
+    setSelectedNode(node);
+    setAssignUsersModalOpen(true);
+  };
+
+  const handleRestoreNode = (node: Node) => {
+    setSelectedNode(node);
+    setRestoreNodeModalOpen(true);
+  };
+
+  const handleHardDeleteNode = async (node: Node) => {
+    if (
+      !confirm(
+        `Are you sure you want to PERMANENTLY delete "${node.name}"? This action cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    const result = await nodeOps.deleteNodeHard(node.id);
+    if (result.success) {
+      refetchArchived();
+    }
+  };
+
+  // User action handlers
+  const handleAssignNode = (user: User) => {
+    setSelectedUser(user);
+    setAssignNodeModalOpen(true);
+  };
+
+  const handleManageRoles = (user: User) => {
+    setSelectedUser(user);
+    setManageRolesModalOpen(true);
+  };
+
+  const handleEditUser = (user: User) => {
+    setSelectedUser(user);
+    setEditUserModalOpen(true);
+  };
+
+  const handleDeleteUser = async (user: User) => {
+    if (
+      !confirm(
+        `Are you sure you want to delete user "${user.firstname} ${user.lastname}"?`
+      )
+    ) {
+      return;
+    }
+    const result = await userOps.deleteUser(user.id);
+    if (result.success) {
+      refetchUsers();
+    }
+  };
+
+  // Modal success handlers
+  const handleNodeModalSuccess = () => {
+    refetch();
+    if (activeTab === "table") refetchAllNodes();
+    if (activeTab === "archived") refetchArchived();
+  };
+
+  const handleUserModalSuccess = () => {
+    refetchUsers();
+  };
+
+  // Loading state
+  if (loading && nodes.length === 0) {
     return (
-      <div className="flex justify-center items-center h-64">
+      <div className="flex flex-col justify-center items-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-        <span className="ml-3 text-gray-600 dark:text-gray-400">
+        <span className="ml-3 text-gray-600 dark:text-gray-400 mt-4">
           Loading network...
         </span>
       </div>
     );
   }
 
+  // Error state
+  if (error && nodes.length === 0) {
+    const axiosError = error as any;
+    return (
+      <div className="flex flex-col justify-center items-center h-64">
+        <AlertCircle className="w-12 h-12 text-red-500 mb-4" />
+        <p className="text-gray-900 dark:text-white font-medium mb-2">
+          Failed to load network
+        </p>
+        <p className="text-gray-600 dark:text-gray-400 text-sm mb-4">
+          {axiosError.response?.status === 403
+            ? "You don't have permission to view the network"
+            : "Please try again or contact support if the problem persists"}
+        </p>
+        <button
+          onClick={() => refetch()}
+          className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+          <RefreshCw className="w-4 h-4 mr-2" />
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4 mobile:space-y-4 md:space-y-6">
-      {/* Header - Hidden on mobile */}
+      {/* Header */}
       {!isMobile && (
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">
-            Network
-          </h1>
-          <p className="text-gray-600 dark:text-gray-300 mt-1">
-            View your organization's hierarchical network structure
-          </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900 dark:text-white">
+              Network
+            </h1>
+            <p className="text-gray-600 dark:text-gray-300 mt-1">
+              Manage your organization's hierarchical network structure
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {activeTab === "network" && (
+              <button
+                onClick={() => {
+                  setParentNodeId(null);
+                  setCreateNodeModalOpen(true);
+                }}
+                className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+                <Plus className="w-4 h-4 mr-2" />
+                Create Node
+              </button>
+            )}
+            {activeTab === "users" && (
+              <button
+                onClick={() => setCreateUserModalOpen(true)}
+                className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+                <Plus className="w-4 h-4 mr-2" />
+                Create User
+              </button>
+            )}
+            <button
+              onClick={() => {
+                if (activeTab === "network") refetchAllNodes();
+                if (activeTab === "archived") refetchArchived();
+                if (activeTab === "users") refetchUsers();
+              }}
+              disabled={isFetching}
+              className="flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+              <RefreshCw
+                className={`w-4 h-4 mr-2 ${isFetching ? "animate-spin" : ""}`}
+              />
+              {isFetching ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Network Tree */}
-      <div
-        className={`rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden ${
-          isMobile ? "mobile-card-elevated" : "bg-white dark:bg-gray-800"
-        }`}>
-        <div className="p-4 mobile:p-4 md:p-6 border-b border-gray-200 dark:border-gray-700">
-          <h2 className="text-base mobile:text-base md:text-lg font-semibold text-gray-900 dark:text-white">
-            Node Hierarchy
-          </h2>
-          <p className="text-xs mobile:text-xs md:text-sm text-gray-500 dark:text-gray-400 mt-1">
-            {hierarchicalNodes.length} root node(s) • {nodes.length} total
-            node(s)
-          </p>
-        </div>
+      {/* Tabs */}
+      <Tabs
+        activeTab={activeTab}
+        onTabChange={(tab) => setActiveTab(tab as any)}>
+        <TabList>
+          <Tab
+            value="network"
+            active={activeTab === "network"}
+            onClick={() => setActiveTab("network")}>
+            Network
+          </Tab>
+          <Tab
+            value="turbo"
+            active={activeTab === "turbo"}
+            onClick={() => setActiveTab("turbo")}>
+            Turbo
+          </Tab>
+          <Tab
+            value="users"
+            active={activeTab === "users"}
+            onClick={() => setActiveTab("users")}>
+            Users
+          </Tab>
+          <Tab
+            value="archived"
+            active={activeTab === "archived"}
+            onClick={() => setActiveTab("archived")}>
+            Archived
+          </Tab>
+        </TabList>
 
-        <div className="p-2 mobile:p-2 md:p-4">
-          {hierarchicalNodes.length === 0 ? (
-            <div className="text-center py-12">
-              <Building className="w-16 h-16 mx-auto text-gray-300 dark:text-gray-600 mb-4" />
-              <p className="text-gray-500 dark:text-gray-400">
-                No nodes found in your network
-              </p>
+        <TabPanels>
+          {/* Network Tab */}
+          <TabPanel value="network" active={activeTab === "network"}>
+            <div className="rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden bg-white dark:bg-gray-800 p-4 md:p-6">
+              {loadingAllNodes ? (
+                <div className="flex justify-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+              ) : allNodesError ? (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <AlertCircle className="w-12 h-12 text-red-500 mb-4" />
+                  <p className="text-gray-700 dark:text-gray-300 mb-2">
+                    Failed to load nodes
+                  </p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                    {(allNodesError as any)?.message ||
+                      "Unknown error occurred"}
+                  </p>
+                  <button
+                    onClick={() => refetchAllNodes()}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                    Retry
+                  </button>
+                </div>
+              ) : !allNodesData || allNodesData.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <AlertCircle className="w-12 h-12 text-gray-400 mb-4" />
+                  <p className="text-gray-700 dark:text-gray-300 mb-2">
+                    No nodes found
+                  </p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                    {allNodesData === undefined
+                      ? "Data is still loading..."
+                      : "There are no active nodes in the system."}
+                  </p>
+                  <button
+                    onClick={() => refetchAllNodes()}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                    Refresh
+                  </button>
+                </div>
+              ) : (
+                <NodeTable
+                  nodes={allNodesData || []}
+                  onView={handleViewNode}
+                  onEdit={handleEditNode}
+                  onAddChild={handleAddChildNode}
+                  onDelete={handleDeleteNode}
+                  onAssignUsers={handleAssignUsers}
+                />
+              )}
             </div>
-          ) : (
-            <div className="space-y-1">{renderNodeTree(hierarchicalNodes)}</div>
-          )}
-        </div>
-      </div>
+          </TabPanel>
+
+          {/* Turbo Tab */}
+          <TabPanel value="turbo" active={activeTab === "turbo"}>
+            <div className="rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden bg-white dark:bg-gray-800 h-[calc(100vh-300px)] min-h-[600px]">
+              <TurboTab />
+            </div>
+          </TabPanel>
+
+          {/* Users Tab */}
+          <TabPanel value="users" active={activeTab === "users"}>
+            <div className="rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden bg-white dark:bg-gray-800 p-4 md:p-6">
+              {loadingUsers ? (
+                <div className="flex justify-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+              ) : (
+                <UserTable
+                  users={usersData || []}
+                  onAssignNode={handleAssignNode}
+                  onManageRoles={handleManageRoles}
+                  onEdit={handleEditUser}
+                  onDelete={handleDeleteUser}
+                />
+              )}
+            </div>
+          </TabPanel>
+
+          {/* Archived Tab */}
+          <TabPanel value="archived" active={activeTab === "archived"}>
+            <div className="rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden bg-white dark:bg-gray-800 p-4 md:p-6">
+              {loadingArchived ? (
+                <div className="flex justify-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+              ) : (
+                <NodeTable
+                  nodes={archivedNodes}
+                  onView={handleViewNode}
+                  onEdit={(node) => {
+                    // In archived tab, Edit button should restore
+                    handleRestoreNode(node);
+                  }}
+                  onDelete={handleHardDeleteNode}
+                  showArchived={true}
+                />
+              )}
+            </div>
+          </TabPanel>
+        </TabPanels>
+      </Tabs>
+
+      {/* Modals */}
+      <CreateNodeModal
+        isOpen={createNodeModalOpen}
+        onClose={() => {
+          setCreateNodeModalOpen(false);
+          setParentNodeId(null);
+        }}
+        onSuccess={handleNodeModalSuccess}
+        parentNodeId={parentNodeId}
+      />
+
+      <EditNodeModal
+        isOpen={editNodeModalOpen}
+        onClose={() => {
+          setEditNodeModalOpen(false);
+          setSelectedNode(null);
+        }}
+        onSuccess={handleNodeModalSuccess}
+        node={selectedNode}
+      />
+
+      <ViewNodeModal
+        isOpen={viewNodeModalOpen}
+        onClose={() => {
+          setViewNodeModalOpen(false);
+          setSelectedNode(null);
+        }}
+        node={selectedNode}
+      />
+
+      <AssignUsersToNodeModal
+        isOpen={assignUsersModalOpen}
+        onClose={() => {
+          setAssignUsersModalOpen(false);
+          setSelectedNode(null);
+        }}
+        onSuccess={handleNodeModalSuccess}
+        node={selectedNode}
+      />
+
+      <RestoreNodeModal
+        isOpen={restoreNodeModalOpen}
+        onClose={() => {
+          setRestoreNodeModalOpen(false);
+          setSelectedNode(null);
+        }}
+        onSuccess={handleNodeModalSuccess}
+        node={selectedNode}
+      />
+
+      <CreateUserModal
+        isOpen={createUserModalOpen}
+        onClose={() => setCreateUserModalOpen(false)}
+        onSuccess={handleUserModalSuccess}
+      />
+
+      <EditUserModal
+        isOpen={editUserModalOpen}
+        onClose={() => {
+          setEditUserModalOpen(false);
+          setSelectedUser(null);
+        }}
+        onSuccess={handleUserModalSuccess}
+        user={selectedUser}
+      />
+
+      <AssignNodeToUserModal
+        isOpen={assignNodeModalOpen}
+        onClose={() => {
+          setAssignNodeModalOpen(false);
+          setSelectedUser(null);
+        }}
+        onSuccess={handleUserModalSuccess}
+        user={selectedUser}
+      />
+
+      <ManageUserRolesModal
+        isOpen={manageRolesModalOpen}
+        onClose={() => {
+          setManageRolesModalOpen(false);
+          setSelectedUser(null);
+        }}
+        onSuccess={handleUserModalSuccess}
+        user={selectedUser}
+      />
     </div>
   );
 }

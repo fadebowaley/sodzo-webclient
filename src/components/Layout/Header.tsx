@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react';
-import { Menu, Bell, Search, User, Globe, LogOut } from "lucide-react";
-import { motion } from 'framer-motion';
+import { Menu, Bell, User, Globe, LogOut, Lock, Users } from "lucide-react";
+import { motion } from "framer-motion";
 import { useNavigate, Link } from "react-router-dom";
-import ThemeToggle from '../UI/ThemeToggle';
-import { useUser } from '../../contexts/UserContext';
-import { useAuth } from '../../contexts/AuthContext';
+import toast from "react-hot-toast";
+import ThemeToggle from "../UI/ThemeToggle";
+import { useAuth } from "../../contexts/AuthContext";
 import { getAvatarUrl } from "../../utils/env";
+import ChangePasswordModal from "../Modals/ChangePasswordModal";
 
 interface HeaderProps {
   onMenuClick: () => void;
@@ -13,21 +14,24 @@ interface HeaderProps {
 
 export default function Header({ onMenuClick }: HeaderProps) {
   // navigate not used here; keep import placeholder in case navigation is added later
-  const { user, logout: userLogout } = useUser();
-  const { user: authUser, logout } = useAuth();
+  const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [profileOpen, setProfileOpen] = useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (profileRef.current && !profileRef.current.contains(event.target as Node)) {
+      if (
+        profileRef.current &&
+        !profileRef.current.contains(event.target as Node)
+      ) {
         setProfileOpen(false);
       }
     }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, []);
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   return (
     <motion.header
@@ -43,16 +47,6 @@ export default function Header({ onMenuClick }: HeaderProps) {
             className="p-2 rounded-lg text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 lg:hidden transition-colors">
             <Menu className="w-5 h-5" />
           </button>
-
-          {/* Search */}
-          <div className="relative hidden md:block">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 dark:text-gray-500 w-4 h-4" />
-            <input
-              type="text"
-              placeholder="Search projects, files, or team members..."
-              className="pl-10 pr-4 py-2 w-80 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
-            />
-          </div>
         </div>
 
         {/* Right side */}
@@ -97,7 +91,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
                     setProfileOpen(false);
                     // clear both auth and user contexts and redirect to auth page
                     logout();
-                    userLogout();
+                    logout();
                     navigate('/');
                   }}
                 >
@@ -107,18 +101,18 @@ export default function Header({ onMenuClick }: HeaderProps) {
             )}
           </div> */}
 
-          {/* Real User (prefer UserContext, fallback to AuthContext) */}
+          {/* User Profile */}
           <div className="relative" ref={profileRef}>
             <button
               className="flex items-center space-x-3 focus:outline-none"
               onClick={() => setProfileOpen((open) => !open)}>
               <img
-                src={getAvatarUrl(user?.avatar, authUser?.avatarUrl)}
+                src={getAvatarUrl(user?.avatar, user?.avatarUrl)}
                 alt={
                   user
                     ? `${user.firstname} ${user.lastname}`
-                    : authUser
-                    ? authUser.name ?? "User"
+                    : user
+                    ? user.name ?? user.firstname ?? "User"
                     : "User avatar"
                 }
                 className="w-8 h-8 rounded-full"
@@ -127,14 +121,16 @@ export default function Header({ onMenuClick }: HeaderProps) {
                 <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
                   {user
                     ? `${user.firstname} ${user.lastname}`
-                    : authUser
-                    ? authUser.name ?? "User"
+                    : user
+                    ? user.name ?? user.firstname ?? "User"
                     : "User"}
                 </p>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
                   {user?.roles?.[0] ||
-                    (Array.isArray(authUser?.metadata?.roles)
-                      ? String(authUser?.metadata?.roles[0])
+                    (Array.isArray(user?.roles)
+                      ? String(user?.roles[0])
+                      : Array.isArray(user?.metadata?.roles)
+                      ? String(user?.metadata?.roles[0])
                       : "Project Manager")}
                 </p>
               </div>
@@ -151,14 +147,16 @@ export default function Header({ onMenuClick }: HeaderProps) {
                   <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
                     {user
                       ? `${user.firstname} ${user.lastname}`
-                      : authUser
-                      ? authUser.name ?? "User"
+                      : user
+                      ? user.name ?? user.firstname ?? "User"
                       : "User"}
                   </p>
                   <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
                     {user?.roles?.[0] ||
-                      (Array.isArray(authUser?.metadata?.roles)
-                        ? String(authUser?.metadata?.roles[0])
+                      (Array.isArray(user?.roles)
+                        ? String(user?.roles[0])
+                        : Array.isArray(user?.metadata?.roles)
+                        ? String(user?.metadata?.roles[0])
                         : "Project Manager")}
                   </p>
                 </div>
@@ -172,12 +170,28 @@ export default function Header({ onMenuClick }: HeaderProps) {
                     <User className="w-4 h-4 mr-3" />
                     Profile Settings
                   </Link>
+                  <button
+                    onClick={() => {
+                      setProfileOpen(false);
+                      setChangePasswordOpen(true);
+                    }}
+                    className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
+                    <Lock className="w-4 h-4 mr-3" />
+                    Change Password
+                  </button>
                   <Link
                     to="/settings?tab=nodes"
                     className="flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                     onClick={() => setProfileOpen(false)}>
                     <Globe className="w-4 h-4 mr-3" />
                     Node Settings
+                  </Link>
+                  <Link
+                    to="/team"
+                    className="flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                    onClick={() => setProfileOpen(false)}>
+                    <Users className="w-4 h-4 mr-3" />
+                    Team
                   </Link>
                 </div>
 
@@ -187,15 +201,8 @@ export default function Header({ onMenuClick }: HeaderProps) {
                     className="flex items-center w-full px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
                     onClick={() => {
                       setProfileOpen(false);
-                      // clear both auth and user contexts
-                      try {
-                        logout();
-                      } catch {}
-                      try {
-                        userLogout();
-                      } catch {}
-                      // redirect to landing page
-                      navigate("/");
+                      // logout() handles all cleanup and redirect internally
+                      logout();
                     }}>
                     <LogOut className="w-4 h-4 mr-3" />
                     Logout
@@ -206,6 +213,15 @@ export default function Header({ onMenuClick }: HeaderProps) {
           </div>
         </div>
       </div>
+
+      {/* Change Password Modal */}
+      <ChangePasswordModal
+        isOpen={changePasswordOpen}
+        onClose={() => setChangePasswordOpen(false)}
+        onSuccess={() => {
+          toast.success("Password changed successfully!");
+        }}
+      />
     </motion.header>
   );
 }

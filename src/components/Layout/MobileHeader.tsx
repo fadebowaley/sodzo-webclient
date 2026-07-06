@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useLocation, Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { Menu, User, Globe, LogOut, X, ChevronLeft } from "lucide-react";
-import { useUser } from "../../contexts/UserContext";
+import { Menu, User, Globe, LogOut, X, ChevronLeft, Lock, Users } from "lucide-react";
+import toast from "react-hot-toast";
 import { useAuth } from "../../contexts/AuthContext";
 import { getAvatarUrl } from "../../utils/env";
 import ThemeToggle from "../UI/ThemeToggle";
+import ChangePasswordModal from "../Modals/ChangePasswordModal";
 
 interface MobileHeaderProps {
   onMenuClick: () => void;
@@ -22,9 +23,9 @@ export default function MobileHeader({
 }: MobileHeaderProps) {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, logout: userLogout } = useUser();
-  const { user: authUser, logout } = useAuth();
+  const { user, logout } = useAuth();
   const [profileOpen, setProfileOpen] = useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
 
   // Get page title from location if not provided
@@ -33,13 +34,14 @@ export default function MobileHeader({
 
     const pathToTitle: Record<string, string> = {
       "/dashboard": "Dashboard",
-      "/projects": "Projects",
+      "/projects": "Modules",
       "/network": "Network",
       "/calendar": "Calendar",
       "/emails": "Email Center",
       "/storage": "Cloud Storage",
       "/reports": "Reports",
       "/settings": "Settings",
+      "/team": "Team",
       "/admin": "Admin",
     };
 
@@ -115,13 +117,9 @@ export default function MobileHeader({
               whileTap={{ scale: 0.9 }}
               aria-label="Profile menu">
               <img
-                src={getAvatarUrl(user?.avatar, authUser?.avatarUrl)}
+                src={getAvatarUrl(user?.avatar)}
                 alt={
-                  user
-                    ? `${user.firstname} ${user.lastname}`
-                    : authUser
-                    ? authUser.name ?? "User"
-                    : "User avatar"
+                  user ? `${user.firstname} ${user.lastname}` : "User avatar"
                 }
                 className="w-8 h-8 rounded-full ring-2 ring-gray-200 dark:ring-gray-700"
               />
@@ -150,17 +148,10 @@ export default function MobileHeader({
                     {/* User Info Section */}
                     <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-gray-800 dark:to-gray-800">
                       <p className="text-sm font-semibold text-gray-900 dark:text-white truncate">
-                        {user
-                          ? `${user.firstname} ${user.lastname}`
-                          : authUser
-                          ? authUser.name ?? "User"
-                          : "User"}
+                        {user ? `${user.firstname} ${user.lastname}` : "User"}
                       </p>
                       <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
-                        {user?.roles?.[0] ||
-                          (Array.isArray(authUser?.metadata?.roles)
-                            ? String(authUser?.metadata?.roles[0])
-                            : "Project Manager")}
+                        {user?.roles?.[0] || "Project Manager"}
                       </p>
                     </div>
 
@@ -173,12 +164,28 @@ export default function MobileHeader({
                         <User className="w-4 h-4 mr-3 text-gray-500 dark:text-gray-400" />
                         Profile Settings
                       </Link>
+                      <button
+                        onClick={() => {
+                          setProfileOpen(false);
+                          setChangePasswordOpen(true);
+                        }}
+                        className="flex items-center w-full px-4 py-3 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors active:bg-gray-100 dark:active:bg-gray-600">
+                        <Lock className="w-4 h-4 mr-3 text-gray-500 dark:text-gray-400" />
+                        Change Password
+                      </button>
                       <Link
                         to="/settings?tab=nodes"
                         className="flex items-center px-4 py-3 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors active:bg-gray-100 dark:active:bg-gray-600"
                         onClick={() => setProfileOpen(false)}>
                         <Globe className="w-4 h-4 mr-3 text-gray-500 dark:text-gray-400" />
                         Node Settings
+                      </Link>
+                      <Link
+                        to="/team"
+                        className="flex items-center px-4 py-3 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors active:bg-gray-100 dark:active:bg-gray-600"
+                        onClick={() => setProfileOpen(false)}>
+                        <Users className="w-4 h-4 mr-3 text-gray-500 dark:text-gray-400" />
+                        Team
                       </Link>
                     </div>
 
@@ -188,13 +195,8 @@ export default function MobileHeader({
                         className="flex items-center w-full px-4 py-3 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors active:bg-red-100 dark:active:bg-red-900/30"
                         onClick={() => {
                           setProfileOpen(false);
-                          try {
-                            logout();
-                          } catch {}
-                          try {
-                            userLogout();
-                          } catch {}
-                          navigate("/");
+                          // logout() handles all cleanup and redirect internally
+                          logout();
                         }}>
                         <LogOut className="w-4 h-4 mr-3" />
                         Logout
@@ -207,6 +209,15 @@ export default function MobileHeader({
           </div>
         </div>
       </div>
+
+      {/* Change Password Modal */}
+      <ChangePasswordModal
+        isOpen={changePasswordOpen}
+        onClose={() => setChangePasswordOpen(false)}
+        onSuccess={() => {
+          toast.success("Password changed successfully!");
+        }}
+      />
     </motion.header>
   );
 }

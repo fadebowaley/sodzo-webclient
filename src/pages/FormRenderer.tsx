@@ -128,7 +128,7 @@ export default function FormRenderer() {
     // In real app, fetch form data from API
     if (formId === "new") {
       // Handle new form creation
-      navigate("/forms");
+      navigate("/projects");
       return;
     }
 
@@ -419,7 +419,7 @@ export default function FormRenderer() {
         </p>
         <div className="animate-pulse">
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Redirecting to projects...
+            Redirecting to modules...
           </p>
         </div>
       </motion.div>
@@ -438,7 +438,7 @@ export default function FormRenderer() {
           onClick={() => navigate("/projects")}
           className="flex items-center text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors">
           <ArrowLeft className="w-4 h-4 mr-2" />
-          Back to Projects
+          Back to Forms
         </button>
         <div className="flex items-center space-x-2">
           <button

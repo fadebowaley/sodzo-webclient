@@ -14,6 +14,17 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
+
+  /* Ensure native date/time/datetime pickers are never hidden by CSS resets */
+  input[type="date"],
+  input[type="time"],
+  input[type="datetime-local"],
+  input[type="month"],
+  input[type="week"] {
+    appearance: auto !important;
+    -webkit-appearance: auto !important;
+    cursor: pointer;
+  }
 }
 
 @layer components {
@@ -66,6 +77,14 @@
     @apply bg-white/80 dark:bg-gray-900/80 backdrop-blur-xl border border-white/20 dark:border-gray-700/30 shadow-xl;
   }
 
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
   .gradient-bg-mobile {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   }
@@ -108,5 +127,45 @@
     100% {
       background-position: 200% 0;
     }
+  }
+
+  /* Custom Chat Scrollbar - Thin and Theme Compatible */
+  .chat-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(156, 163, 175, 0.4) transparent;
+  }
+
+  .chat-scrollbar::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+
+  .chat-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+    border-radius: 10px;
+  }
+
+  .chat-scrollbar::-webkit-scrollbar-thumb {
+    background-color: rgba(156, 163, 175, 0.4);
+    border-radius: 10px;
+    border: none;
+    transition: background-color 0.2s ease;
+  }
+
+  .chat-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(156, 163, 175, 0.6);
+  }
+
+  /* Dark mode scrollbar */
+  .dark .chat-scrollbar {
+    scrollbar-color: rgba(107, 114, 128, 0.4) transparent;
+  }
+
+  .dark .chat-scrollbar::-webkit-scrollbar-thumb {
+    background-color: rgba(107, 114, 128, 0.4);
+  }
+
+  .dark .chat-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(107, 114, 128, 0.6);
   }
 }

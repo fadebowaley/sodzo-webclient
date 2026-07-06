@@ -1,0 +1,189 @@
+name: WebClient CI/CD Pipeline - Production
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [production, proddy]
+  pull_request:
+    branches: [production, proddy]
+
+concurrency:
+  group: webclient-production-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "18"
+  REGISTRY: ghcr.io
+  IMAGE_NAME: fadebowaley/sabywebclient
+  VITE_API_BASE: https://api.saby.ai/v1
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-test-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application (production API base)
+        run: |
+          echo "=== BUILDING WEBCLIENT FOR PRODUCTION API ==="
+          VITE_API_BASE="${{ env.VITE_API_BASE }}" npm run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=production
+            type=sha,prefix=sha-
+            type=ref,event=branch
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            VITE_API_BASE=${{ env.VITE_API_BASE }}
+
+  deploy-production:
+    needs: build-test-docker
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Resolve production host and user
+        run: |
+          PROD_HOST="${{ secrets.PRODUCTION_IP }}"
+          if [ -z "$PROD_HOST" ]; then
+            echo "❌ Missing host secret. Set PRODUCTION_IP."
+            exit 1
+          fi
+
+          SSH_USER="${{ secrets.PROD_SSH_USER }}"
+          if [ -z "$SSH_USER" ]; then
+            SSH_USER="saby"
+          fi
+
+          echo "PROD_HOST=$PROD_HOST" >> "$GITHUB_ENV"
+          echo "SSH_USER=$SSH_USER" >> "$GITHUB_ENV"
+
+      - name: Prepare SSH key
+        run: |
+          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "❌ SSH_PRIVATE_KEY secret is not configured."
+            exit 1
+          fi
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > /tmp/ssh_key
+          chmod 600 /tmp/ssh_key
+
+      - name: Test SSH connectivity
+        run: |
+          ssh -i /tmp/ssh_key \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "${SSH_USER}@${PROD_HOST}" "echo 'SSH OK to production host'; hostname"
+
+      - name: Deploy web portal container
+        run: |
+          echo "🚀 Deploying ${REGISTRY}/${IMAGE_NAME}:production to ${SSH_USER}@${PROD_HOST}"
+          ssh -i /tmp/ssh_key \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "${SSH_USER}@${PROD_HOST}" << 'ENDSSH'
+            set -euo pipefail
+            cd /opt/saby
+
+            export DOCKER_CONFIG=/tmp/.docker
+            mkdir -p "$DOCKER_CONFIG"
+
+            if [ -n "${{ secrets.GHCR_PAT }}" ]; then
+              echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u fadebowaley --password-stdin
+            else
+              echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            fi
+
+            export WEBPORTAL_IMAGE=ghcr.io/fadebowaley/sabywebclient:production
+            docker compose -f docker-compose.yml pull webportal
+            docker compose -f docker-compose.yml up -d --no-deps --force-recreate webportal
+            docker compose -f docker-compose.yml ps webportal
+            docker logs --tail 50 saby-webportal || true
+
+            docker exec saby-webportal sh -lc "grep -R -n 'https://api\\.saby\\.ai/v1' /usr/share/nginx/html/assets/index-*.js | head -n 1"
+            if docker exec saby-webportal sh -lc "grep -R -n 'api\\.stg\\.saby\\.ai' /usr/share/nginx/html/assets/index-*.js >/dev/null"; then
+              echo "❌ Staging API URL still present in built bundle."
+              exit 1
+            fi
+          ENDSSH
+
+      - name: Verify live bundle
+        run: |
+          ASSET_PATH=""
+          for i in $(seq 1 20); do
+            ASSET_PATH="$(curl -fsSL --connect-timeout 5 --max-time 10 https://web.saby.ai | grep -oE 'assets/[^"]+\.js' | head -n 1 || true)"
+            if [ -n "$ASSET_PATH" ]; then
+              break
+            fi
+            echo "⏳ Waiting for web.saby.ai to become ready (attempt $i/20)..."
+            sleep 3
+          done
+
+          if [ -z "$ASSET_PATH" ]; then
+            echo "❌ Could not find JS asset path on web.saby.ai after retries"
+            exit 1
+          fi
+
+          BUNDLE=""
+          for i in $(seq 1 20); do
+            BUNDLE="$(curl -fsSL --connect-timeout 5 --max-time 10 "https://web.saby.ai/${ASSET_PATH}" || true)"
+            if [ -n "$BUNDLE" ]; then
+              break
+            fi
+            echo "⏳ Waiting for JS bundle to become readable (attempt $i/20)..."
+            sleep 3
+          done
+          if [ -z "$BUNDLE" ]; then
+            echo "❌ Could not fetch live JS bundle after retries"
+            exit 1
+          fi
+
+          echo "$BUNDLE" | grep -q "https://api.saby.ai/v1"
+          if echo "$BUNDLE" | grep -q "api.stg.saby.ai"; then
+            echo "❌ Staging API URL still detected on live web bundle."
+            exit 1
+          fi
+
+      - name: Deployment summary
+        run: |
+          echo "✅ WebClient production deployment completed."
+          echo "🌐 https://web.saby.ai now targets https://api.saby.ai/v1"
