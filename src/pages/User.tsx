@@ -2,115 +2,27 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import { Users, Shield, Search, ChevronDown, ChevronUp } from "lucide-react";
-
-// ─── SWITCH THIS WHEN BACKEND IS READY ───────────────────────────────────────
-// true  = show mock data (for demo / showing your boss)
-// false = fetch real data from localhost:3000
-const USE_MOCK = true;
-
-// The URL your boss gave you — a separate server from the main Saby API.
-const COMPLIANCE_URL =
-  "http://localhost:3000/reports/baseline-intelligence/compliance";
+import { useAuth } from "../contexts/AuthContext";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-interface ComplianceUser {
+/** Flattened row used for rendering — mapped from the API response. */
+interface ComplianceUserRow {
   id: string;
-  firstname: string;
-  lastname: string;
+  fullName: string;
   email: string;
-  roles: string[];
-  status: "Compliant" | "Non-Compliant" | "Pending";
+  status: "Compliant" | "Non-Compliant";
   lastUpdated: string;
 }
 
-// ─── Mock Data (remove this section when backend is live) ────────────────────
-
-const MOCK_USERS: ComplianceUser[] = [
-  {
-    id: "1",
-    firstname: "John",
-    lastname: "Okafor",
-    email: "john.okafor@swordofspirit.org",
-    roles: ["Pastor", "Admin"],
-    status: "Compliant",
-    lastUpdated: "2026-06-28T10:30:00Z",
-  },
-  {
-    id: "2",
-    firstname: "Grace",
-    lastname: "Adebayo",
-    email: "grace.adebayo@swordofspirit.org",
-    roles: ["Deacon", "Treasurer"],
-    status: "Compliant",
-    lastUpdated: "2026-06-25T14:15:00Z",
-  },
-  {
-    id: "3",
-    firstname: "David",
-    lastname: "Emmanuel",
-    email: "david.emmanuel@swordofspirit.org",
-    roles: ["Usher", "Member"],
-    status: "Non-Compliant",
-    lastUpdated: "2026-07-01T09:00:00Z",
-  },
-  {
-    id: "4",
-    firstname: "Mary",
-    lastname: "Chukwu",
-    email: "mary.chukwu@swordofspirit.org",
-    roles: ["Choir", "Member"],
-    status: "Pending",
-    lastUpdated: "2026-07-02T16:45:00Z",
-  },
-  {
-    id: "5",
-    firstname: "Samuel",
-    lastname: "Ibrahim",
-    email: "samuel.ibrahim@swordofspirit.org",
-    roles: ["Elder", "Admin", "Finance"],
-    status: "Compliant",
-    lastUpdated: "2026-06-30T11:20:00Z",
-  },
-  {
-    id: "6",
-    firstname: "Esther",
-    lastname: "Nwachukwu",
-    email: "esther.nwachukwu@swordofspirit.org",
-    roles: ["Sunday School", "Member"],
-    status: "Non-Compliant",
-    lastUpdated: "2026-06-20T08:00:00Z",
-  },
-  {
-    id: "7",
-    firstname: "Peter",
-    lastname: "Oluwaseun",
-    email: "peter.oluwaseun@swordofspirit.org",
-    roles: ["Security", "Member"],
-    status: "Pending",
-    lastUpdated: "2026-07-03T07:30:00Z",
-  },
-  {
-    id: "8",
-    firstname: "Deborah",
-    lastname: "Akintola",
-    email: "deborah.akintola@swordofspirit.org",
-    roles: ["Counselor", "Deacon"],
-    status: "Compliant",
-    lastUpdated: "2026-06-29T13:00:00Z",
-  },
-];
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function getStatusBadge(status: ComplianceUser["status"]) {
+function getStatusBadge(status: ComplianceUserRow["status"]) {
   switch (status) {
     case "Compliant":
       return "bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300";
     case "Non-Compliant":
       return "bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300";
-    case "Pending":
-      return "bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300";
     default:
       return "bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300";
   }
@@ -119,14 +31,12 @@ function getStatusBadge(status: ComplianceUser["status"]) {
 // ─── Page Component ──────────────────────────────────────────────────────────
 
 export default function User() {
+  const { api } = useAuth();
   const [search, setSearch] = useState("");
-  const [sortKey, setSortKey] = useState<keyof ComplianceUser | "">("");
+  const [sortKey, setSortKey] = useState<keyof ComplianceUserRow | "">("");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   // ── Data Fetching ────────────────────────────────────────────────────────
-  // When USE_MOCK is true: returns fake data instantly (for demo).
-  // When USE_MOCK is false: hits localhost:3000 for real data.
-  // Just flip the USE_MOCK flag at the top when your backend is ready.
 
   const {
     data: users = [],
@@ -135,22 +45,20 @@ export default function User() {
     refetch,
   } = useQuery({
     queryKey: ["user-compliance"],
-    queryFn: async (): Promise<ComplianceUser[]> => {
-      if (USE_MOCK) {
-        // Simulate network delay so the loading spinner is visible briefly
-        await new Promise((r) => setTimeout(r, 500));
-        return MOCK_USERS;
-      }
+    queryFn: async (): Promise<ComplianceUserRow[]> => {
+      const response = await api.get("/compliance/table", {
+        params: { limit: 100, sortBy: "overallCompliance", sortOrder: "desc" },
+      });
 
-      // Real API call — runs when USE_MOCK is false
-      const response = await fetch(COMPLIANCE_URL);
-      if (!response.ok) {
-        throw new Error(
-          `Server returned ${response.status}: ${response.statusText}`
-        );
-      }
-      const json = await response.json();
-      return json.results || json.data || json;
+      const records = response.data?.data || [];
+
+      return records.map((r: any) => ({
+        id: r.id,
+        fullName: r.user?.fullName || "—",
+        email: r.user?.email || "—",
+        status: r.isCompliant ? "Compliant" : "Non-Compliant",
+        lastUpdated: r.updatedAt || r.createdAt,
+      }));
     },
     retry: 1,
   });
@@ -161,10 +69,8 @@ export default function User() {
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return (
-      u.firstname?.toLowerCase().includes(q) ||
-      u.lastname?.toLowerCase().includes(q) ||
-      u.email?.toLowerCase().includes(q) ||
-      u.roles?.join(" ").toLowerCase().includes(q)
+      u.fullName?.toLowerCase().includes(q) ||
+      u.email?.toLowerCase().includes(q)
     );
   });
 
@@ -174,14 +80,14 @@ export default function User() {
     const bv = b[sortKey];
     if (av == null) return 1;
     if (bv == null) return -1;
-    const aStr = Array.isArray(av) ? av.join(", ") : String(av);
-    const bStr = Array.isArray(bv) ? bv.join(", ") : String(bv);
+    const aStr = String(av);
+    const bStr = String(bv);
     return sortDir === "asc"
       ? aStr.localeCompare(bStr)
       : bStr.localeCompare(aStr);
   });
 
-  const toggleSort = (key: keyof ComplianceUser) => {
+  const toggleSort = (key: keyof ComplianceUserRow) => {
     if (sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
@@ -193,7 +99,7 @@ export default function User() {
   const counts = {
     compliant: users.filter((u) => u.status === "Compliant").length,
     nonCompliant: users.filter((u) => u.status === "Non-Compliant").length,
-    pending: users.filter((u) => u.status === "Pending").length,
+    pending: 0, // API has no "Pending" concept — kept for layout compatibility
   };
 
   // ── Render ───────────────────────────────────────────────────────────────
@@ -245,7 +151,7 @@ export default function User() {
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
           <input
             type="text"
-            placeholder="Search by name, email, or role..."
+            placeholder="Search by name or email..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full pl-12 pr-4 py-3 border border-gray-300 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm"
@@ -280,7 +186,7 @@ export default function User() {
               Failed to load compliance data
             </p>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              {(error as any)?.message || "Is the backend running on port 3000?"}
+              {(error as any)?.message || "Could not reach the compliance endpoint."}
             </p>
             <button
               onClick={() => refetch()}
@@ -305,12 +211,11 @@ export default function User() {
         {!isLoading && !error && users.length > 0 && (
           <>
             {/* Column Headers */}
-            <div className="bg-gray-50 dark:bg-gray-900/50 border-b border-gray-200 dark:border-gray-700 px-4 py-3 hidden md:grid md:grid-cols-12 gap-4 text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">
+            <div className="bg-gray-50 dark:bg-gray-900/50 border-b border-gray-200 dark:border-gray-700 px-4 py-3 hidden md:grid md:grid-cols-10 gap-4 text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">
               {(
                 [
-                  { key: "firstname" as const, label: "Name", span: "md:col-span-3" },
+                  { key: "fullName" as const, label: "Name", span: "md:col-span-3" },
                   { key: "email" as const, label: "Email", span: "md:col-span-3" },
-                  { key: "roles" as const, label: "Roles", span: "md:col-span-2" },
                   { key: "status" as const, label: "Status", span: "md:col-span-2" },
                   { key: "lastUpdated" as const, label: "Last Updated", span: "md:col-span-2" },
                 ]
@@ -341,37 +246,17 @@ export default function User() {
                   transition={{ delay: i * 0.02 }}
                   className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
                 >
-                  <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+                  <div className="grid grid-cols-1 md:grid-cols-10 gap-4 items-center">
                     {/* Name */}
                     <div className="md:col-span-3">
                       <span className="font-semibold text-gray-900 dark:text-white">
-                        {u.firstname} {u.lastname}
+                        {u.fullName}
                       </span>
                     </div>
 
                     {/* Email */}
                     <div className="md:col-span-3 text-sm text-gray-600 dark:text-gray-400 truncate">
                       {u.email}
-                    </div>
-
-                    {/* Roles */}
-                    <div className="md:col-span-2">
-                      <div className="flex flex-wrap gap-1">
-                        {u.roles?.length > 0 ? (
-                          u.roles.map((role) => (
-                            <span
-                              key={role}
-                              className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
-                            >
-                              {role}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="text-gray-400 text-sm italic">
-                            No roles
-                          </span>
-                        )}
-                      </div>
                     </div>
 
                     {/* Status */}
